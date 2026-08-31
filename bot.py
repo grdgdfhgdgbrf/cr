@@ -45,8 +45,8 @@ if not BOT_TOKEN:
 # ==================== КОНФИГУРАЦИЯ ====================
 class Config:
     # Торговля
-    COMMISSION = Decimal('0.005')  # 0.5%
-    UPDATE_INTERVAL = 45  # 45 секунд
+    COMMISSION = Decimal('0.005')
+    UPDATE_INTERVAL = 45
     MAX_LEVERAGE = 10
     MIN_TRADE = Decimal('0.1')
     MAX_TRADE = Decimal('1000000')
@@ -74,15 +74,31 @@ class Config:
     
     # Игрок
     START_BALANCE = Decimal('50000')
+    START_LEVEL = 1
+    START_EXP = 0
     
     # VIP
     VIP_LEVELS = {
-        0: {'name': 'Новичок', 'bonus': 0, 'color': '⬜'},
+        0: {'name': 'Новичок', 'bonus': 0, 'color': '⬜', 'min_deposit': 0},
         1: {'name': 'Бронза', 'bonus': 2, 'color': '🥉', 'min_deposit': 10000},
         2: {'name': 'Серебро', 'bonus': 5, 'color': '🥈', 'min_deposit': 50000},
         3: {'name': 'Золото', 'bonus': 10, 'color': '🥇', 'min_deposit': 200000},
         4: {'name': 'Платина', 'bonus': 15, 'color': '💎', 'min_deposit': 1000000},
         5: {'name': 'Алмаз', 'bonus': 25, 'color': '👑', 'min_deposit': 5000000}
+    }
+    
+    # Уровни игрока
+    LEVEL_EXP = [0, 100, 250, 500, 1000, 2000, 3500, 5500, 8000, 12000, 18000, 25000, 35000, 50000, 75000, 100000]
+    
+    # Магазин
+    SHOP_ITEMS = {
+        'booster_2h': {'name': 'Бустер x2 (2ч)', 'price': 5000, 'emoji': '⚡', 'type': 'booster', 'duration': 7200},
+        'booster_12h': {'name': 'Бустер x2 (12ч)', 'price': 20000, 'emoji': '🔥', 'type': 'booster', 'duration': 43200},
+        'insurance': {'name': 'Страховка краша', 'price': 10000, 'emoji': '🛡️', 'type': 'insurance', 'duration': 3600},
+        'vip_pass': {'name': 'VIP-пропуск (24ч)', 'price': 50000, 'emoji': '💎', 'type': 'vip', 'duration': 86400},
+        'farm_boost': {'name': 'Ускоритель фермы', 'price': 15000, 'emoji': '🌾', 'type': 'farm_boost', 'duration': 3600},
+        'lucky_coin': {'name': 'Счастливая монета', 'price': 25000, 'emoji': '🍀', 'type': 'lucky', 'uses': 5},
+        'crypto_key': {'name': 'Крипто-ключ', 'price': 100000, 'emoji': '🔑', 'type': 'key', 'uses': 1}
     }
 
 # Активы
@@ -123,7 +139,7 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ==================== FSM СОСТОЯНИЯ ====================
+# ==================== FSM ====================
 class TradeFSM(StatesGroup):
     asset = State()
     amount = State()
@@ -138,19 +154,12 @@ class CrashFSM(StatesGroup):
     asset = State()
     amount = State()
 
-class P2PFSM(StatesGroup):
-    create = State()
-    amount = State()
-    price = State()
+class ShopFSM(StatesGroup):
+    item = State()
+    confirm = State()
 
-class FarmFSM(StatesGroup):
-    select = State()
-
-class TournamentFSM(StatesGroup):
-    join = State()
-
-class WithdrawFSM(StatesGroup):
-    amount = State()
+class QuestFSM(StatesGroup):
+    claim = State()
 
 class TransferFSM(StatesGroup):
     user = State()
@@ -169,6 +178,7 @@ class Database:
         conn = self.get_conn()
         c = conn.cursor()
 
+        # ========== ОСНОВНЫЕ ТАБЛИЦЫ ==========
         # Users
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -190,7 +200,11 @@ class Database:
                 farm_exp REAL DEFAULT 0.0,
                 farm_last_claim INTEGER DEFAULT 0,
                 total_deposit REAL DEFAULT 0.0,
-                withdrawable REAL DEFAULT 0.0
+                withdrawable REAL DEFAULT 0.0,
+                level INTEGER DEFAULT 1,
+                exp REAL DEFAULT 0.0,
+                crystals INTEGER DEFAULT 0,
+                premium_until INTEGER DEFAULT 0
             )
         ''')
 
@@ -207,6 +221,7 @@ class Database:
             )
         ''')
 
+        # ========== ЭКОНОМИКА ==========
         # Prices
         c.execute('''
             CREATE TABLE IF NOT EXISTS prices (
@@ -242,7 +257,7 @@ class Database:
             )
         ''')
 
-        # Crash bets
+        # ========== КРАШ-СТАВКИ ==========
         c.execute('''
             CREATE TABLE IF NOT EXISTS crash_bets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -257,7 +272,7 @@ class Database:
             )
         ''')
 
-        # Referrals
+        # ========== РЕФЕРАЛЫ ==========
         c.execute('''
             CREATE TABLE IF NOT EXISTS referrals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -267,7 +282,7 @@ class Database:
             )
         ''')
 
-        # Achievements
+        # ========== ДОСТИЖЕНИЯ ==========
         c.execute('''
             CREATE TABLE IF NOT EXISTS achievements (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -278,7 +293,7 @@ class Database:
             )
         ''')
 
-        # P2P offers
+        # ========== P2P ==========
         c.execute('''
             CREATE TABLE IF NOT EXISTS p2p_offers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -292,7 +307,7 @@ class Database:
             )
         ''')
 
-        # Tournaments
+        # ========== ТУРНИРЫ ==========
         c.execute('''
             CREATE TABLE IF NOT EXISTS tournaments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -315,6 +330,89 @@ class Database:
             )
         ''')
 
+        # ========== МАГАЗИН ==========
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS inventory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                item_id TEXT,
+                quantity INTEGER DEFAULT 1,
+                expires_at INTEGER DEFAULT 0,
+                uses_left INTEGER DEFAULT 0,
+                UNIQUE(user_id, item_id)
+            )
+        ''')
+
+        # ========== КВЕСТЫ ==========
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS quests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                description TEXT,
+                objective_type TEXT,
+                objective_count INTEGER,
+                reward REAL,
+                reward_crystals INTEGER,
+                reset_daily INTEGER DEFAULT 0
+            )
+        ''')
+
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS quest_progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                quest_id INTEGER,
+                progress INTEGER DEFAULT 0,
+                completed INTEGER DEFAULT 0,
+                last_claim INTEGER DEFAULT 0,
+                UNIQUE(user_id, quest_id)
+            )
+        ''')
+
+        # ========== ЕЖЕДНЕВНЫЕ ЗАДАНИЯ ==========
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS daily_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                task_date TEXT,
+                task1_done INTEGER DEFAULT 0,
+                task2_done INTEGER DEFAULT 0,
+                task3_done INTEGER DEFAULT 0,
+                claimed INTEGER DEFAULT 0
+            )
+        ''')
+
+        # ========== СИСТЕМА РЕЙТИНГА ==========
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS rating_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                rating INTEGER DEFAULT 1000,
+                timestamp INTEGER
+            )
+        ''')
+
+        # ========== БАНК ==========
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS bank_accounts (
+                user_id INTEGER PRIMARY KEY,
+                balance REAL DEFAULT 0.0,
+                last_interest INTEGER DEFAULT 0
+            )
+        ''')
+
+        # ========== ЛОТЕРЕЯ ==========
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS lottery_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                ticket_number INTEGER,
+                draw_id INTEGER,
+                timestamp INTEGER
+            )
+        ''')
+
+        # ========== ИНИЦИАЛИЗАЦИЯ ==========
         # Init prices
         for asset, data in ASSETS.items():
             c.execute('''
@@ -322,9 +420,28 @@ class Database:
                 VALUES (?, ?, ?)
             ''', (asset, float(data['initial']), int(datetime.now().timestamp())))
 
+        # Init quests
+        c.execute('SELECT COUNT(*) FROM quests')
+        if c.fetchone()[0] == 0:
+            default_quests = [
+                ('Первая сделка', 'Соверши свою первую покупку', 'trade', 1, 500, 0, 0),
+                ('Торговец', 'Соверши 10 сделок', 'trade', 10, 2000, 5, 0),
+                ('Профи', 'Соверши 50 сделок', 'trade', 50, 10000, 20, 0),
+                ('Краш-босс', 'Выиграй 5 ставок на краше', 'crash_win', 5, 3000, 10, 0),
+                ('Фермер', 'Собери урожай 3 раза', 'farm_claim', 3, 1500, 5, 0),
+                ('Инвестор', 'Имей 3 разных актива', 'assets_count', 3, 5000, 15, 0),
+                ('Миллионер', 'Заработай 1 000 000 JET', 'earn', 1000000, 50000, 50, 0),
+                ('Ежедневный игрок', 'Заходи в бота 7 дней подряд', 'daily_streak', 7, 7000, 10, 1)
+            ]
+            for q in default_quests:
+                c.execute('''
+                    INSERT INTO quests (name, description, objective_type, objective_count, reward, reward_crystals, reset_daily)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', q)
+
         conn.commit()
         conn.close()
-        logger.info("DB initialized")
+        logger.info("Database initialized")
 
     # ========== GETTERS ==========
     def get_price(self, asset: str) -> Decimal:
@@ -357,10 +474,10 @@ class Database:
                    'last_daily', 'daily_streak', 'total_earned', 'stake_amount',
                    'stake_time', 'leverage', 'last_activity', 'total_trades',
                    'win_trades', 'farm_level', 'farm_exp', 'farm_last_claim',
-                   'total_deposit', 'withdrawable']
+                   'total_deposit', 'withdrawable', 'level', 'exp', 'crystals', 'premium_until']
             data = dict(zip(cols, r))
             for k in ['balance', 'total_earned', 'stake_amount', 'farm_exp',
-                     'total_deposit', 'withdrawable']:
+                     'total_deposit', 'withdrawable', 'exp']:
                 data[k] = Decimal(str(data[k]))
             return data
         return None
@@ -372,6 +489,59 @@ class Database:
         r = c.fetchall()
         conn.close()
         return {x[0]: {'amount': Decimal(str(x[1])), 'avg_price': Decimal(str(x[2]))} for x in r}
+
+    def get_inventory(self, user_id: int) -> Dict[str, Dict]:
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('SELECT item_id, quantity, expires_at, uses_left FROM inventory WHERE user_id = ?', (user_id,))
+        r = c.fetchall()
+        conn.close()
+        return {x[0]: {'quantity': x[1], 'expires_at': x[2], 'uses_left': x[3]} for x in r}
+
+    def get_quests(self, user_id: int) -> List[Dict]:
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('''
+            SELECT q.id, q.name, q.description, q.objective_type, q.objective_count, 
+                   q.reward, q.reward_crystals, q.reset_daily,
+                   qp.progress, qp.completed, qp.last_claim
+            FROM quests q
+            LEFT JOIN quest_progress qp ON q.id = qp.quest_id AND qp.user_id = ?
+        ''', (user_id,))
+        r = c.fetchall()
+        conn.close()
+        result = []
+        for row in r:
+            result.append({
+                'id': row[0],
+                'name': row[1],
+                'description': row[2],
+                'type': row[3],
+                'count': row[4],
+                'reward': Decimal(str(row[5])),
+                'crystals': row[6],
+                'reset_daily': row[7],
+                'progress': row[8] or 0,
+                'completed': row[9] or 0,
+                'last_claim': row[10] or 0
+            })
+        return result
+
+    def get_rating(self, user_id: int) -> int:
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('SELECT rating FROM rating_history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1', (user_id,))
+        r = c.fetchone()
+        conn.close()
+        return r[0] if r else 1000
+
+    def get_bank_balance(self, user_id: int) -> Decimal:
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('SELECT balance FROM bank_accounts WHERE user_id = ?', (user_id,))
+        r = c.fetchone()
+        conn.close()
+        return Decimal(str(r[0])) if r else Decimal('0')
 
     # ========== SETTERS ==========
     def update_price(self, asset: str, price: Decimal):
@@ -413,21 +583,6 @@ class Database:
         conn.commit()
         conn.close()
 
-    def create_user(self, user_id: int, username: str = None):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO users (user_id, username, balance, last_activity)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, username, float(Config.START_BALANCE), int(datetime.now().timestamp())))
-        for asset in ASSETS:
-            c.execute('''
-                INSERT INTO portfolio (user_id, asset, amount, avg_price)
-                VALUES (?, ?, 0.0, 0.0)
-            ''', (user_id, asset))
-        conn.commit()
-        conn.close()
-
     def add_transaction(self, user_id: int, ttype: str, asset: str, amount: Decimal, price: Decimal, profit: Decimal = Decimal('0')):
         conn = self.get_conn()
         c = conn.cursor()
@@ -440,6 +595,32 @@ class Database:
             if profit > 0:
                 c.execute('UPDATE users SET win_trades = win_trades + 1, total_earned = total_earned + ? WHERE user_id = ?',
                          (float(profit), user_id))
+            # Update rating
+            rating = self.get_rating(user_id)
+            new_rating = rating + int(float(profit) / 1000)
+            c.execute('INSERT INTO rating_history (user_id, rating, timestamp) VALUES (?, ?, ?)',
+                     (user_id, max(1000, new_rating), int(datetime.now().timestamp())))
+        conn.commit()
+        conn.close()
+
+    def create_user(self, user_id: int, username: str = None):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO users (user_id, username, balance, level, last_activity)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, username, float(Config.START_BALANCE), Config.START_LEVEL, int(datetime.now().timestamp())))
+        for asset in ASSETS:
+            c.execute('''
+                INSERT INTO portfolio (user_id, asset, amount, avg_price)
+                VALUES (?, ?, 0.0, 0.0)
+            ''', (user_id, asset))
+        # Init rating
+        c.execute('INSERT INTO rating_history (user_id, rating, timestamp) VALUES (?, ?, ?)',
+                 (user_id, 1000, int(datetime.now().timestamp())))
+        # Init bank
+        c.execute('INSERT INTO bank_accounts (user_id, balance, last_interest) VALUES (?, ?, ?)',
+                 (user_id, 0.0, int(datetime.now().timestamp())))
         conn.commit()
         conn.close()
 
@@ -459,22 +640,6 @@ class Database:
         r = c.fetchone()
         conn.close()
         return r[0] if r else 0
-
-    def add_achievement(self, user_id: int, ach_id: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('INSERT OR IGNORE INTO achievements (user_id, achievement_id, timestamp) VALUES (?, ?, ?)',
-                 (user_id, ach_id, int(datetime.now().timestamp())))
-        conn.commit()
-        conn.close()
-
-    def get_achievements(self, user_id: int) -> List[int]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT achievement_id FROM achievements WHERE user_id = ?', (user_id,))
-        r = c.fetchall()
-        conn.close()
-        return [x[0] for x in r]
 
     def get_all_users(self) -> List[int]:
         conn = self.get_conn()
@@ -593,88 +758,184 @@ class Database:
             return r[0], Decimal(str(r[1])), r[2]
         return 0, Decimal('0'), 0
 
-    def add_p2p_offer(self, user_id: int, asset: str, amount: Decimal, price: Decimal, otype: str):
+    def add_inventory(self, user_id: int, item_id: str, quantity: int = 1, expires_at: int = 0, uses_left: int = 0):
         conn = self.get_conn()
         c = conn.cursor()
         c.execute('''
-            INSERT INTO p2p_offers (user_id, asset, amount, price, type, status, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, asset, float(amount), float(price), otype, 'active', int(datetime.now().timestamp())))
-        offer_id = c.lastrowid
-        conn.commit()
-        conn.close()
-        return offer_id
-
-    def get_p2p_offers(self, asset: str = None, otype: str = None) -> List[Dict]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        query = 'SELECT * FROM p2p_offers WHERE status = "active"'
-        params = []
-        if asset:
-            query += ' AND asset = ?'
-            params.append(asset)
-        if otype:
-            query += ' AND type = ?'
-            params.append(otype)
-        query += ' ORDER BY timestamp DESC'
-        c.execute(query, params)
-        r = c.fetchall()
-        conn.close()
-        cols = ['id', 'user_id', 'asset', 'amount', 'price', 'type', 'status', 'timestamp']
-        return [dict(zip(cols, x)) for x in r]
-
-    def update_p2p_status(self, offer_id: int, status: str):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE p2p_offers SET status = ? WHERE id = ?', (status, offer_id))
-        conn.commit()
-        conn.close()
-
-    def create_tournament(self, name: str, prize: Decimal, duration_hours: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        now = int(datetime.now().timestamp())
-        c.execute('''
-            INSERT INTO tournaments (name, prize, start_time, end_time, status)
+            INSERT INTO inventory (user_id, item_id, quantity, expires_at, uses_left)
             VALUES (?, ?, ?, ?, ?)
-        ''', (name, float(prize), now, now + duration_hours * 3600, 'active'))
-        t_id = c.lastrowid
-        conn.commit()
-        conn.close()
-        return t_id
-
-    def join_tournament(self, tournament_id: int, user_id: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            INSERT OR IGNORE INTO tournament_participants (tournament_id, user_id)
-            VALUES (?, ?)
-        ''', (tournament_id, user_id))
-        c.execute('UPDATE tournaments SET participants = participants + 1 WHERE id = ?', (tournament_id,))
+            ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + ?
+        ''', (user_id, item_id, quantity, expires_at, uses_left, quantity))
         conn.commit()
         conn.close()
 
-    def get_tournament_ranking(self, tournament_id: int) -> List[Tuple[int, str, Decimal]]:
+    def use_inventory(self, user_id: int, item_id: str) -> bool:
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('SELECT quantity, uses_left FROM inventory WHERE user_id = ? AND item_id = ?', (user_id, item_id))
+        r = c.fetchone()
+        if not r or r[0] <= 0:
+            conn.close()
+            return False
+        new_qty = r[0] - 1
+        if r[1] > 0:
+            new_uses = r[1] - 1
+            c.execute('UPDATE inventory SET quantity = ?, uses_left = ? WHERE user_id = ? AND item_id = ?',
+                     (new_qty, new_uses, user_id, item_id))
+        else:
+            c.execute('UPDATE inventory SET quantity = ? WHERE user_id = ? AND item_id = ?',
+                     (new_qty, user_id, item_id))
+        conn.commit()
+        conn.close()
+        return True
+
+    def update_quest_progress(self, user_id: int, quest_id: int, progress: int = 1):
         conn = self.get_conn()
         c = conn.cursor()
         c.execute('''
-            SELECT u.user_id, u.username, tp.profit
-            FROM tournament_participants tp
-            JOIN users u ON tp.user_id = u.user_id
-            WHERE tp.tournament_id = ?
-            ORDER BY tp.profit DESC
-        ''', (tournament_id,))
+            INSERT INTO quest_progress (user_id, quest_id, progress, last_claim)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, quest_id) DO UPDATE SET progress = progress + ?
+        ''', (user_id, quest_id, progress, int(datetime.now().timestamp()), progress))
+        conn.commit()
+        conn.close()
+
+    def complete_quest(self, user_id: int, quest_id: int, reward: Decimal, crystals: int):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('''
+            UPDATE quest_progress SET completed = 1, last_claim = ? 
+            WHERE user_id = ? AND quest_id = ?
+        ''', (int(datetime.now().timestamp()), user_id, quest_id))
+        c.execute('UPDATE users SET balance = balance + ?, crystals = crystals + ? WHERE user_id = ?',
+                 (float(reward), crystals, user_id))
+        conn.commit()
+        conn.close()
+
+    def get_daily_tasks(self, user_id: int) -> Dict:
+        conn = self.get_conn()
+        c = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        c.execute('''
+            SELECT task1_done, task2_done, task3_done, claimed
+            FROM daily_tasks WHERE user_id = ? AND task_date = ?
+        ''', (user_id, today))
+        r = c.fetchone()
+        conn.close()
+        if r:
+            return {'task1': r[0], 'task2': r[1], 'task3': r[2], 'claimed': r[3]}
+        return {'task1': 0, 'task2': 0, 'task3': 0, 'claimed': 0}
+
+    def update_daily_task(self, user_id: int, task_num: int):
+        conn = self.get_conn()
+        c = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        c.execute('''
+            INSERT INTO daily_tasks (user_id, task_date, task1_done, task2_done, task3_done)
+            VALUES (?, ?, 0, 0, 0)
+            ON CONFLICT(user_id, task_date) DO NOTHING
+        ''', (user_id, today))
+        c.execute(f'UPDATE daily_tasks SET task{task_num}_done = 1 WHERE user_id = ? AND task_date = ?',
+                 (user_id, today))
+        conn.commit()
+        conn.close()
+
+    def claim_daily_tasks(self, user_id: int) -> bool:
+        conn = self.get_conn()
+        c = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        c.execute('''
+            SELECT task1_done, task2_done, task3_done, claimed
+            FROM daily_tasks WHERE user_id = ? AND task_date = ?
+        ''', (user_id, today))
+        r = c.fetchone()
+        if not r or r[3] == 1:
+            conn.close()
+            return False
+        done = r[0] + r[1] + r[2]
+        if done >= 2:  # Минимум 2 задания для награды
+            reward = 500 + (done - 2) * 300
+            c.execute('UPDATE daily_tasks SET claimed = 1 WHERE user_id = ? AND task_date = ?', (user_id, today))
+            c.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (reward, user_id))
+            conn.commit()
+            conn.close()
+            return True
+        conn.close()
+        return False
+
+    def add_achievement(self, user_id: int, ach_id: int):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO achievements (user_id, achievement_id, timestamp) VALUES (?, ?, ?)',
+                 (user_id, ach_id, int(datetime.now().timestamp())))
+        conn.commit()
+        conn.close()
+
+    def get_achievements(self, user_id: int) -> List[int]:
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('SELECT achievement_id FROM achievements WHERE user_id = ?', (user_id,))
         r = c.fetchall()
         conn.close()
-        return [(x[0], x[1], Decimal(str(x[2]))) for x in r]
+        return [x[0] for x in r]
 
-    def update_tournament_profit(self, tournament_id: int, user_id: int, profit: Decimal):
+    def update_bank_interest(self, user_id: int, interest: Decimal):
         conn = self.get_conn()
         c = conn.cursor()
         c.execute('''
-            UPDATE tournament_participants SET profit = profit + ?
-            WHERE tournament_id = ? AND user_id = ?
-        ''', (float(profit), tournament_id, user_id))
+            UPDATE bank_accounts SET balance = balance + ?, last_interest = ?
+            WHERE user_id = ?
+        ''', (float(interest), int(datetime.now().timestamp()), user_id))
+        conn.commit()
+        conn.close()
+
+    def get_bank(self, user_id: int) -> Tuple[Decimal, int]:
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('SELECT balance, last_interest FROM bank_accounts WHERE user_id = ?', (user_id,))
+        r = c.fetchone()
+        conn.close()
+        if r:
+            return Decimal(str(r[0])), r[1]
+        return Decimal('0'), 0
+
+    def add_lottery_ticket(self, user_id: int, ticket_num: int, draw_id: int):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO lottery_tickets (user_id, ticket_number, draw_id, timestamp)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, ticket_num, draw_id, int(datetime.now().timestamp())))
+        conn.commit()
+        conn.close()
+
+    def get_lottery_tickets(self, user_id: int, draw_id: int) -> List[int]:
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('SELECT ticket_number FROM lottery_tickets WHERE user_id = ? AND draw_id = ?', (user_id, draw_id))
+        r = c.fetchall()
+        conn.close()
+        return [x[0] for x in r]
+
+    def get_level_exp(self, level: int) -> int:
+        if level < len(Config.LEVEL_EXP):
+            return Config.LEVEL_EXP[level]
+        return 100000 * level
+
+    def add_exp(self, user_id: int, exp: Decimal):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute('SELECT level, exp FROM users WHERE user_id = ?', (user_id,))
+        r = c.fetchone()
+        if r:
+            level, current_exp = r[0], Decimal(str(r[1]))
+            current_exp += exp
+            max_exp = self.get_level_exp(level)
+            while current_exp >= max_exp:
+                current_exp -= max_exp
+                level += 1
+                max_exp = self.get_level_exp(level)
+            c.execute('UPDATE users SET level = ?, exp = ? WHERE user_id = ?', (level, float(current_exp), user_id))
         conn.commit()
         conn.close()
 
@@ -696,15 +957,22 @@ def main_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🌾 Ферма", callback_data="farm")
     )
     builder.row(
-        InlineKeyboardButton(text="🔄 P2P-биржа", callback_data="p2p"),
-        InlineKeyboardButton(text="🏅 Турниры", callback_data="tournaments")
+        InlineKeyboardButton(text="🔄 P2P", callback_data="p2p"),
+        InlineKeyboardButton(text="🏅 Квесты", callback_data="quests")
     )
     builder.row(
         InlineKeyboardButton(text="🎁 Дейли", callback_data="daily"),
         InlineKeyboardButton(text="👥 Рефералы", callback_data="referral")
     )
     builder.row(
-        InlineKeyboardButton(text="📰 Новости", callback_data="news"),
+        InlineKeyboardButton(text="🏪 Магазин", callback_data="shop"),
+        InlineKeyboardButton(text="🏦 Банк", callback_data="bank")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🎰 Лотерея", callback_data="lottery"),
+        InlineKeyboardButton(text="📰 Новости", callback_data="news")
+    )
+    builder.row(
         InlineKeyboardButton(text="❓ Помощь", callback_data="help")
     )
     return builder.as_markup()
@@ -761,37 +1029,12 @@ def profile_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📈 Статистика", callback_data="p_stats")
     )
     builder.row(
-        InlineKeyboardButton(text="💎 VIP-статус", callback_data="p_vip"),
+        InlineKeyboardButton(text="💎 VIP", callback_data="p_vip"),
         InlineKeyboardButton(text="📊 Капитал", callback_data="p_capital")
     )
     builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
-    )
-    return builder.as_markup()
-
-def stake_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="🔒 Застейкать", callback_data="stake_do"),
-        InlineKeyboardButton(text="🔓 Забрать", callback_data="unstake")
-    )
-    builder.row(
-        InlineKeyboardButton(text="📊 Мой стейк", callback_data="my_stake")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
-    )
-    return builder.as_markup()
-
-def top_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="🏆 По капиталу", callback_data="top_capital"),
-        InlineKeyboardButton(text="📈 По прибыли", callback_data="top_profit")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🎯 По сделкам", callback_data="top_trades"),
-        InlineKeyboardButton(text="💀 По крашам", callback_data="top_crashes")
+        InlineKeyboardButton(text="⬆️ Уровень", callback_data="p_level"),
+        InlineKeyboardButton(text="💎 Кристаллы", callback_data="p_crystals")
     )
     builder.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
@@ -811,54 +1054,70 @@ def cancel_kb() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"))
     return builder.as_markup()
 
-def crash_kb(asset: str) -> InlineKeyboardMarkup:
+def shop_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    for item_id, data in Config.SHOP_ITEMS.items():
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{data['emoji']} {data['name']} — {data['price']:.0f} JET",
+                callback_data=f"shop_{item_id}"
+            )
+        )
     builder.row(
-        InlineKeyboardButton(text="📈 Рост x1.5", callback_data=f"cr_up_{asset}"),
-        InlineKeyboardButton(text="📉 Падение x2.5", callback_data=f"cr_down_{asset}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🎰 Лотерея x4", callback_data=f"cr_auto_{asset}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_assets")
-    )
-    return builder.as_markup()
-
-def farm_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="🌾 Собрать урожай", callback_data="farm_claim"),
-        InlineKeyboardButton(text="📊 Ферма", callback_data="farm_info")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬆️ Улучшить", callback_data="farm_upgrade")
+        InlineKeyboardButton(text="📦 Мой инвентарь", callback_data="shop_inventory")
     )
     builder.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
     )
     return builder.as_markup()
 
-def p2p_kb() -> InlineKeyboardMarkup:
+def quest_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📈 Купить", callback_data="p2p_buy"),
-        InlineKeyboardButton(text="📉 Продать", callback_data="p2p_sell")
-    )
-    builder.row(
-        InlineKeyboardButton(text="📋 Мои ордера", callback_data="p2p_my"),
-        InlineKeyboardButton(text="📊 Все ордера", callback_data="p2p_all")
+        InlineKeyboardButton(text="📋 Квесты", callback_data="quest_list"),
+        InlineKeyboardButton(text="📊 Прогресс", callback_data="quest_progress")
     )
     builder.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
     )
     return builder.as_markup()
 
-def tournament_kb() -> InlineKeyboardMarkup:
+def daily_tasks_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="🏅 Текущий турнир", callback_data="tournament_current"),
-        InlineKeyboardButton(text="📊 Рейтинг", callback_data="tournament_rank")
+        InlineKeyboardButton(text="✅ Задание 1", callback_data="daily_task_1"),
+        InlineKeyboardButton(text="✅ Задание 2", callback_data="daily_task_2"),
+        InlineKeyboardButton(text="✅ Задание 3", callback_data="daily_task_3")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🎁 Забрать награду", callback_data="daily_claim")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
+    )
+    return builder.as_markup()
+
+def bank_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="💰 Пополнить", callback_data="bank_deposit"),
+        InlineKeyboardButton(text="💸 Снять", callback_data="bank_withdraw")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📊 Проценты", callback_data="bank_interest")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
+    )
+    return builder.as_markup()
+
+def lottery_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🎫 Купить билет (1000 JET)", callback_data="lottery_buy")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📊 Мои билеты", callback_data="lottery_my")
     )
     builder.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
@@ -896,15 +1155,11 @@ def calc_price(asset: str) -> Tuple[Decimal, bool, Decimal]:
     current = db.get_price(asset)
     data = ASSETS[asset]
     
-    # Рост
     growth = Decimal(str(random.uniform(float(Config.GROWTH_MIN), float(Config.GROWTH_MAX))))
     growth *= data['growth']
-    
-    # Шум
     noise = Decimal(str(random.uniform(0.97, 1.03)))
     new_price = current * growth * noise
     
-    # Краш
     is_crash, crash_pct = check_crash(asset)
     if is_crash:
         new_price = current * (Decimal('1') - crash_pct)
@@ -933,7 +1188,6 @@ async def start_cmd(msg: types.Message, state: FSMContext):
         db.create_user(uid, uname)
         logger.info(f"New user: {uid}")
         
-        # Рефералка
         args = msg.text.split()
         if len(args) > 1 and args[1].startswith('ref_'):
             try:
@@ -942,18 +1196,19 @@ async def start_cmd(msg: types.Message, state: FSMContext):
                     db.add_referral(ref_id, uid)
                     db.update_balance(ref_id, Config.REFERRAL_BONUS)
                     await bot.send_message(ref_id,
-                        f"🎉 Новый игрок @{uname} по твоей ссылке!\n"
-                        f"+{Config.REFERRAL_BONUS:.0f} JET"
+                        f"🎉 Новый игрок @{uname} по твоей ссылке!\n+{Config.REFERRAL_BONUS:.0f} JET"
                     )
             except:
                 pass
     
     await msg.answer(
-        f"🚀 *КриптоКаток v3.0*\n\n"
+        f"🚀 *КриптоКаток v3.1*\n\n"
         f"👤 @{uname}\n"
-        f"💰 Стартовый капитал: {Config.START_BALANCE:.0f} JET\n\n"
+        f"💰 Баланс: {Config.START_BALANCE:.0f} JET\n"
+        f"⭐ Уровень: {Config.START_LEVEL}\n\n"
         f"📈 *Цены растут каждую минуту!*\n"
-        f"💀 Краши, стейкинг, P2P, турниры и ферма!\n\n"
+        f"💀 Краши, стейкинг, P2P, турниры, ферма,\n"
+        f"🏪 магазин, квесты, банк, лотерея и многое другое!\n\n"
         f"⬇️ Выбирай действие:",
         reply_markup=main_kb()
     )
@@ -982,10 +1237,7 @@ async def back_assets(cb: CallbackQuery):
 @dp.callback_query(F.data == "trade")
 async def trade_cb(cb: CallbackQuery):
     await cb.message.edit_text(
-        "📈 *Выбери актив для торговли:*\n\n"
-        "🟢 Зелёный — рост\n"
-        "🔴 Красный — падение\n"
-        "⚪ Стабильно",
+        "📈 *Выбери актив для торговли:*",
         reply_markup=assets_kb("back_main")
     )
     await cb.answer()
@@ -1035,7 +1287,7 @@ async def lev_cb(cb: CallbackQuery):
     c.execute('UPDATE users SET leverage = ? WHERE user_id = ?', (level, cb.from_user.id))
     conn.commit()
     conn.close()
-    await cb.answer(f"⚡ Плечо x{level} установлено!", show_alert=True)
+    await cb.answer(f"⚡ Плечо x{level}!", show_alert=True)
     await cb.message.edit_text(
         get_asset_text(asset),
         reply_markup=trade_kb(asset)
@@ -1062,7 +1314,7 @@ async def sell_cb(cb: CallbackQuery, state: FSMContext):
     asset = cb.data.replace("sell_", "")
     portfolio = db.get_portfolio(cb.from_user.id)
     if portfolio.get(asset, {}).get('amount', Decimal('0')) <= 0:
-        await cb.answer("❌ У тебя нет этого актива!", show_alert=True)
+        await cb.answer("❌ Нет актива!", show_alert=True)
         return
     await state.update_data(action="sell", asset=asset)
     await cb.message.edit_text(
@@ -1140,6 +1392,10 @@ async def confirm_yes(cb: CallbackQuery, state: FSMContext):
             f"✅ *Куплено!*\n\n{asset}: +{amount:.4f}\nЦена: {price:.2f}\nСписано: {total:.2f}",
             reply_markup=trade_kb(asset)
         )
+        # Квесты
+        db.update_quest_progress(uid, 1, 1)  # Первая сделка
+        db.update_quest_progress(uid, 2, 1)  # Торговец
+        db.update_quest_progress(uid, 3, 1)  # Профи
     else:
         price = db.get_price(asset)
         portfolio = db.get_portfolio(uid)
@@ -1148,12 +1404,33 @@ async def confirm_yes(cb: CallbackQuery, state: FSMContext):
         db.update_balance(uid, total)
         db.update_portfolio(uid, asset, -amount)
         db.add_transaction(uid, 'sell', asset, amount, price, profit)
+        
+        # VIP бонус
+        vip = db.get_vip_level(uid)
+        vip_bonus = get_vip_info(vip)['bonus']
+        if vip_bonus > 0 and profit > 0:
+            bonus_amt = profit * Decimal(vip_bonus) / Decimal('100')
+            db.update_balance(uid, bonus_amt)
+            profit += bonus_amt
+        
         await cb.message.edit_text(
-            f"✅ *Продано!*\n\n{asset}: -{amount:.4f}\nЦена: {price:.2f}\nПолучено: {total:.2f}\n"
-            f"Прибыль: {'+' if profit > 0 else ''}{profit:.2f}",
+            f"✅ *Продано!*\n\n{asset}: -{amount:.4f}\nЦена: {price:.2f}\n"
+            f"Получено: {total:.2f}\nПрибыль: {'+' if profit > 0 else ''}{profit:.2f}",
             reply_markup=trade_kb(asset)
         )
-        # Tournaments
+        
+        # Опыт
+        exp_gain = abs(profit) / Decimal('100')
+        db.add_exp(uid, exp_gain)
+        
+        # Ежедневные задания
+        db.update_daily_task(uid, 1)
+        
+        # Квесты
+        db.update_quest_progress(uid, 2, 1)
+        db.update_quest_progress(uid, 3, 1)
+        
+        # Турниры
         await update_tournaments(uid, profit)
     
     await check_achievements(uid, cb.message)
@@ -1172,31 +1449,6 @@ async def cancel_cb(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text("❌ Отменено", reply_markup=main_kb())
     await cb.answer()
 
-# ==================== ЛИМИТ-ОРДЕРА ====================
-@dp.callback_query(F.data.startswith("limit_buy_"))
-async def limit_buy(cb: CallbackQuery, state: FSMContext):
-    asset = cb.data.replace("limit_buy_", "")
-    await state.update_data(action="limit_buy", asset=asset)
-    await cb.message.edit_text(
-        f"📈 *Лимит-ордер на покупку {asset}*\n\n"
-        f"Введи цену, по которой хочешь купить:",
-        reply_markup=cancel_kb()
-    )
-    await state.set_state(TradeFSM.limit_buy)
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("limit_sell_"))
-async def limit_sell(cb: CallbackQuery, state: FSMContext):
-    asset = cb.data.replace("limit_sell_", "")
-    await state.update_data(action="limit_sell", asset=asset)
-    await cb.message.edit_text(
-        f"📉 *Лимит-ордер на продажу {asset}*\n\n"
-        f"Введи цену, по которой хочешь продать:",
-        reply_markup=cancel_kb()
-    )
-    await state.set_state(TradeFSM.limit_sell)
-    await cb.answer()
-
 # ==================== ПРОФИЛЬ ====================
 @dp.callback_query(F.data == "profile")
 async def profile_cb(cb: CallbackQuery):
@@ -1208,13 +1460,19 @@ async def show_profile(uid: int, msg: types.Message):
     capital = db.get_total_capital(uid)
     rank = db.get_rank(uid)
     vip = get_vip_info(user['vip_level'])
+    rating = db.get_rating(uid)
+    
+    level_exp = db.get_level_exp(user['level'])
+    exp_progress = int(float(user['exp']) / level_exp * 100) if level_exp > 0 else 0
     
     text = (
         f"👤 *Профиль* @{user['username'] or 'anon'}\n\n"
+        f"⭐ Уровень: {user['level']} ({exp_progress}%)\n"
         f"💰 Баланс: {fmt(user['balance'])} JET\n"
         f"💎 Капитал: {fmt(capital)} JET\n"
-        f"🏆 Рейтинг: #{rank}\n"
-        f"{vip['color']} VIP: {vip['name']} (+{vip['bonus']}% бонус)\n"
+        f"💎 Кристаллы: {user['crystals']}\n"
+        f"🏆 Рейтинг: #{rank} (ELO: {rating})\n"
+        f"{vip['color']} VIP: {vip['name']} (+{vip['bonus']}%)\n"
         f"👥 Рефералов: {user['referral_count']}\n"
         f"🔒 Стейк: {user['stake_amount']:.2f} JET\n"
         f"🌾 Ферма: Lv.{user['farm_level']}\n"
@@ -1227,7 +1485,8 @@ async def p_balance(cb: CallbackQuery):
     user = db.get_user(cb.from_user.id)
     await cb.message.edit_text(
         f"💰 *Баланс:* {fmt(user['balance'])} JET\n"
-        f"💸 Доступно к выводу: {fmt(user['withdrawable'])} JET",
+        f"💸 Доступно: {fmt(user['withdrawable'])} JET\n"
+        f"💎 Кристаллы: {user['crystals']}",
         reply_markup=profile_kb()
     )
     await cb.answer()
@@ -1291,13 +1550,15 @@ async def p_stats(cb: CallbackQuery):
     user = db.get_user(uid)
     stats = db.get_trade_stats(uid)
     wr = (stats['win'] / stats['total'] * 100) if stats['total'] > 0 else 0
+    rating = db.get_rating(uid)
     text = (
         f"📈 *Статистика*\n\n"
         f"📊 Сделок: {stats['total']}\n"
         f"🏆 Побед: {stats['win']} ({wr:.1f}%)\n"
         f"💰 Заработано: {fmt(user['total_earned'])} JET\n"
         f"👥 Рефералов: {user['referral_count']}\n"
-        f"⚡ Активность: {user['last_activity']}"
+        f"⭐ Уровень: {user['level']}\n"
+        f"🎯 Рейтинг: {rating}"
     )
     await cb.message.edit_text(text, reply_markup=profile_kb())
     await cb.answer()
@@ -1335,6 +1596,44 @@ async def p_capital(cb: CallbackQuery):
         f"📊 Топ-1: {fmt(db.get_top(1)[0][2]) if db.get_top(1) else '—'}",
         reply_markup=profile_kb()
     )
+    await cb.answer()
+
+@dp.callback_query(F.data == "p_level")
+async def p_level(cb: CallbackQuery):
+    uid = cb.from_user.id
+    user = db.get_user(uid)
+    level_exp = db.get_level_exp(user['level'])
+    next_exp = db.get_level_exp(user['level'] + 1)
+    text = (
+        f"⭐ *Уровень {user['level']}*\n\n"
+        f"Опыт: {user['exp']:.0f}/{level_exp}\n"
+        f"До следующего: {level_exp - user['exp']:.0f} EXP\n"
+        f"Следующий уровень: {user['level'] + 1}\n\n"
+        f"*Как получить опыт:*\n"
+        f"• Продажа активов (+прибыль/100)\n"
+        f"• Ежедневные задания\n"
+        f"• Квесты"
+    )
+    await cb.message.edit_text(text, reply_markup=profile_kb())
+    await cb.answer()
+
+@dp.callback_query(F.data == "p_crystals")
+async def p_crystals(cb: CallbackQuery):
+    uid = cb.from_user.id
+    user = db.get_user(uid)
+    text = (
+        f"💎 *Кристаллы:* {user['crystals']}\n\n"
+        f"*Как получить:*\n"
+        f"• За выполнение квестов\n"
+        f"• Ежедневные задания\n"
+        f"• Достижения\n"
+        f"• Турниры\n\n"
+        f"*Что можно купить:*\n"
+        f"• VIP-пропуски\n"
+        f"• Бустеры\n"
+        f"• Счастливые монеты"
+    )
+    await cb.message.edit_text(text, reply_markup=profile_kb())
     await cb.answer()
 
 # ==================== СТЕЙКИНГ ====================
@@ -1423,7 +1722,7 @@ async def my_stake(cb: CallbackQuery):
         total_time = Config.STAKE_HOURS * 3600
         progress = min(100, int(elapsed / total_time * 100))
         if elapsed >= total_time:
-            status = "✅ Готов к разблокировке"
+            status = "✅ Готов"
         else:
             rem = total_time - elapsed
             h, m = rem // 3600, (rem % 3600) // 60
@@ -1498,9 +1797,7 @@ async def crash_cb(cb: CallbackQuery):
     await cb.message.edit_text(
         "💀 *Краш-арена*\n\n"
         "Ставь на рост или падение!\n"
-        "📈 Рост x1.5\n"
-        "📉 Падение x2.5\n"
-        "🎰 Лотерея x4\n\n"
+        "📈 Рост x1.5\n📉 Падение x2.5\n🎰 Лотерея x4\n\n"
         "Выбери актив:",
         reply_markup=assets_kb("back_main")
     )
@@ -1565,12 +1862,21 @@ async def crash_amount(msg: types.Message, state: FSMContext):
             db.update_balance(uid, win_amt - amount)
             result = f"✅ *Победа!* +{win_amt:.2f} JET"
             status = "win"
+            db.update_quest_progress(uid, 4, 1)  # Краш-босс
         else:
             db.update_balance(uid, -amount)
             result = f"❌ *Поражение!* -{amount:.2f} JET"
             status = "lose"
         
-        db.add_crash_bet(uid, asset, bet_type, amount, coef, status)
+        # Сохраняем ставку
+        conn = db.get_conn()
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO crash_bets (user_id, asset, bet_type, amount, coefficient, status, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (uid, asset, bet_type, float(amount), float(coef), status, int(datetime.now().timestamp())))
+        conn.commit()
+        conn.close()
         
         await state.clear()
         await msg.answer(
@@ -1581,6 +1887,185 @@ async def crash_amount(msg: types.Message, state: FSMContext):
         )
     except:
         await msg.answer("❌ Введи число!", reply_markup=cancel_kb())
+
+# ==================== ФЕРМА ====================
+@dp.callback_query(F.data == "farm")
+async def farm_cb(cb: CallbackQuery):
+    await show_farm(cb.from_user.id, cb.message)
+    await cb.answer()
+
+async def show_farm(uid: int, msg: types.Message):
+    level, exp, last = db.get_farm(uid)
+    exp_needed = level * 100 + 50
+    income = Decimal('1') * (Decimal('1.1') ** level)
+    
+    now = int(datetime.now().timestamp())
+    if last > 0:
+        elapsed = (now - last) // 3600
+        available = income * Decimal(elapsed) if elapsed > 0 else Decimal('0')
+    else:
+        available = Decimal('0')
+    
+    text = (
+        f"🌾 *Ферма*\n\n"
+        f"Уровень: {level}\n"
+        f"Опыт: {exp:.0f}/{exp_needed}\n"
+        f"Доход: {income:.2f} JET/час\n"
+        f"Доступно: {available:.2f} JET"
+    )
+    await msg.edit_text(text, reply_markup=farm_kb())
+
+@dp.callback_query(F.data == "farm_claim")
+async def farm_claim(cb: CallbackQuery):
+    uid = cb.from_user.id
+    level, exp, last = db.get_farm(uid)
+    income = Decimal('1') * (Decimal('1.1') ** level)
+    now = int(datetime.now().timestamp())
+    if last > 0:
+        elapsed = (now - last) // 3600
+        if elapsed > 0:
+            amount = income * Decimal(elapsed)
+            db.update_balance(uid, amount)
+            db.update_farm(uid, level, exp + Decimal(elapsed), now)
+            await cb.message.edit_text(
+                f"🌾 *Урожай собран!*\n\n+{amount:.2f} JET",
+                reply_markup=farm_kb()
+            )
+            db.update_quest_progress(uid, 5, 1)
+            await cb.answer()
+            return
+    await cb.answer("🌾 Ещё ничего не выросло!", show_alert=True)
+
+@dp.callback_query(F.data == "farm_upgrade")
+async def farm_upgrade(cb: CallbackQuery):
+    uid = cb.from_user.id
+    level, exp, last = db.get_farm(uid)
+    exp_needed = level * 100 + 50
+    if exp >= exp_needed:
+        db.update_farm(uid, level + 1, Decimal('0'), last)
+        await cb.message.edit_text(
+            f"⬆️ *Ферма улучшена!*\n\nУровень {level} → {level+1}",
+            reply_markup=farm_kb()
+        )
+        await cb.answer()
+    else:
+        await cb.answer(f"❌ Нужно {exp_needed - exp:.0f} опыта!", show_alert=True)
+
+@dp.callback_query(F.data == "farm_info")
+async def farm_info(cb: CallbackQuery):
+    await show_farm(cb.from_user.id, cb.message)
+    await cb.answer()
+
+# ==================== P2P ====================
+@dp.callback_query(F.data == "p2p")
+async def p2p_cb(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "🔄 *P2P-биржа*\n\nТоргуй напрямую с другими игроками!",
+        reply_markup=p2p_kb()
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data == "p2p_all")
+async def p2p_all(cb: CallbackQuery):
+    offers = db.get_p2p_offers()
+    text = "📊 *Все ордера:*\n\n"
+    if offers:
+        for o in offers[:10]:
+            emoji = "📈" if o['type'] == 'buy' else "📉"
+            user = db.get_user(o['user_id'])
+            uname = user['username'] if user else 'anon'
+            text += f"{emoji} {o['asset']} {o['amount']:.2f} @ {o['price']:.2f} — @{uname}\n"
+    else:
+        text += "❌ Нет активных ордеров"
+    await cb.message.edit_text(text, reply_markup=p2p_kb())
+    await cb.answer()
+
+# ==================== МАГАЗИН ====================
+@dp.callback_query(F.data == "shop")
+async def shop_cb(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "🏪 *Магазин*\n\nВыбери товар:",
+        reply_markup=shop_kb()
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("shop_"))
+async def shop_buy(cb: CallbackQuery, state: FSMContext):
+    item_id = cb.data.replace("shop_", "")
+    if item_id == "inventory":
+        await shop_inventory(cb)
+        return
+    
+    item = Config.SHOP_ITEMS.get(item_id)
+    if not item:
+        await cb.answer("❌ Товар не найден", show_alert=True)
+        return
+    
+    user = db.get_user(cb.from_user.id)
+    if user['balance'] < item['price']:
+        await cb.answer(f"❌ Нужно {item['price']:.0f} JET!", show_alert=True)
+        return
+    
+    await state.update_data(shop_item=item_id, shop_price=item['price'])
+    await cb.message.edit_text(
+        f"🛒 *Покупка*\n\n{item['emoji']} {item['name']}\n"
+        f"💰 Цена: {item['price']:.0f} JET\n"
+        f"📝 {item.get('description', '')}\n\n"
+        f"Подтверждаешь?",
+        reply_markup=confirm_kb()
+    )
+    await state.set_state(ShopFSM.confirm)
+    await cb.answer()
+
+@dp.callback_query(F.data == "shop_inventory")
+async def shop_inventory(cb: CallbackQuery):
+    uid = cb.from_user.id
+    inv = db.get_inventory(uid)
+    text = "📦 *Мой инвентарь*\n\n"
+    if inv:
+        for item_id, data in inv.items():
+            if data['quantity'] > 0:
+                item = Config.SHOP_ITEMS.get(item_id)
+                if item:
+                    text += f"{item['emoji']} {item['name']}: {data['quantity']} шт.\n"
+    else:
+        text += "❌ Пусто"
+    await cb.message.edit_text(text, reply_markup=shop_kb())
+    await cb.answer()
+
+# ==================== КВЕСТЫ ====================
+@dp.callback_query(F.data == "quests")
+async def quests_cb(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "🏅 *Квесты*\n\nВыполняй задания и получай награды!",
+        reply_markup=quest_kb()
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data == "quest_list")
+async def quest_list(cb: CallbackQuery):
+    uid = cb.from_user.id
+    quests = db.get_quests(uid)
+    text = "📋 *Квесты*\n\n"
+    for q in quests:
+        if q['completed']:
+            status = "✅"
+        else:
+            status = f"⬜ {q['progress']}/{q['count']}"
+        text += f"{status} *{q['name']}*\n{q['description']}\n"
+        text += f"Награда: {q['reward']:.0f} JET + {q['crystals']} 💎\n\n"
+    await cb.message.edit_text(text, reply_markup=quest_kb())
+    await cb.answer()
+
+@dp.callback_query(F.data == "quest_progress")
+async def quest_progress(cb: CallbackQuery):
+    uid = cb.from_user.id
+    quests = db.get_quests(uid)
+    completed = sum(1 for q in quests if q['completed'])
+    total = len(quests)
+    text = f"📊 *Прогресс квестов*\n\nВыполнено: {completed}/{total} ({completed/total*100:.0f}%)"
+    await cb.message.edit_text(text, reply_markup=quest_kb())
+    await cb.answer()
 
 # ==================== ДЕЙЛИ ====================
 @dp.callback_query(F.data == "daily")
@@ -1609,6 +2094,7 @@ async def daily_cb(cb: CallbackQuery):
     bonus = Config.DAILY_BONUSES[streak]
     db.update_balance(uid, Decimal(str(bonus)))
     db.update_daily(uid, streak + 1)
+    db.update_quest_progress(uid, 8, 1)  # Ежедневный игрок
     
     await cb.message.edit_text(
         f"🎁 *Дейли бонус!*\n\n+{bonus} JET\nДень {streak+1}/{len(Config.DAILY_BONUSES)}\n"
@@ -1634,6 +2120,136 @@ async def referral_cb(cb: CallbackQuery):
     else:
         text += f"🔒 Осталось {5-count} друзей"
     await cb.message.edit_text(text, reply_markup=main_kb())
+    await cb.answer()
+
+# ==================== БАНК ====================
+@dp.callback_query(F.data == "bank")
+async def bank_cb(cb: CallbackQuery):
+    await show_bank(cb.from_user.id, cb.message)
+    await cb.answer()
+
+async def show_bank(uid: int, msg: types.Message):
+    balance, last = db.get_bank(uid)
+    interest = Decimal('0.05')  # 5% в день
+    text = (
+        f"🏦 *Банк*\n\n"
+        f"💰 Баланс: {fmt(balance)} JET\n"
+        f"📊 Процент: 5% в день\n"
+        f"💡 Пассивный доход!"
+    )
+    await msg.edit_text(text, reply_markup=bank_kb())
+
+@dp.callback_query(F.data == "bank_deposit")
+async def bank_deposit(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(
+        "💰 Введи сумму для депозита:",
+        reply_markup=cancel_kb()
+    )
+    await state.set_state(TransferFSM.amount)
+    await state.update_data(bank_action="deposit")
+    await cb.answer()
+
+@dp.callback_query(F.data == "bank_withdraw")
+async def bank_withdraw(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(
+        "💸 Введи сумму для вывода:",
+        reply_markup=cancel_kb()
+    )
+    await state.set_state(TransferFSM.amount)
+    await state.update_data(bank_action="withdraw")
+    await cb.answer()
+
+@dp.message(TransferFSM.amount)
+async def bank_amount(msg: types.Message, state: FSMContext):
+    try:
+        amount = Decimal(msg.text)
+        if amount <= 0:
+            await msg.answer("❌ > 0!", reply_markup=cancel_kb())
+            return
+        
+        data = await state.get_data()
+        action = data.get('bank_action')
+        uid = msg.from_user.id
+        
+        if action == "deposit":
+            user = db.get_user(uid)
+            if amount > user['balance']:
+                await msg.answer(f"❌ Недостаточно!", reply_markup=cancel_kb())
+                return
+            db.update_balance(uid, -amount)
+            conn = db.get_conn()
+            c = conn.cursor()
+            c.execute('UPDATE bank_accounts SET balance = balance + ? WHERE user_id = ?',
+                     (float(amount), uid))
+            conn.commit()
+            conn.close()
+            await state.clear()
+            await msg.answer(
+                f"💰 *Депозит принят!*\n\n+{amount:.2f} JET в банк",
+                reply_markup=bank_kb()
+            )
+        else:
+            bank_balance = db.get_bank_balance(uid)
+            if amount > bank_balance:
+                await msg.answer(f"❌ В банке только {fmt(bank_balance)}!", reply_markup=cancel_kb())
+                return
+            db.update_balance(uid, amount)
+            conn = db.get_conn()
+            c = conn.cursor()
+            c.execute('UPDATE bank_accounts SET balance = balance - ? WHERE user_id = ?',
+                     (float(amount), uid))
+            conn.commit()
+            conn.close()
+            await state.clear()
+            await msg.answer(
+                f"💸 *Вывод выполнен!*\n\n+{amount:.2f} JET на баланс",
+                reply_markup=bank_kb()
+            )
+    except:
+        await msg.answer("❌ Введи число!", reply_markup=cancel_kb())
+
+@dp.callback_query(F.data == "bank_interest")
+async def bank_interest(cb: CallbackQuery):
+    uid = cb.from_user.id
+    balance, last = db.get_bank(uid)
+    if balance > 0:
+        interest = balance * Decimal('0.05')  # 5%
+        db.update_bank_interest(uid, interest)
+        await cb.message.edit_text(
+            f"📊 *Проценты начислены!*\n\n+{interest:.2f} JET",
+            reply_markup=bank_kb()
+        )
+    else:
+        await cb.answer("💰 Нет средств в банке!", show_alert=True)
+
+# ==================== ЛОТЕРЕЯ ====================
+@dp.callback_query(F.data == "lottery")
+async def lottery_cb(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "🎰 *Лотерея*\n\n"
+        "Купи билет за 1000 JET и выиграй до 100 000 JET!\n"
+        "Розыгрыш каждый час!",
+        reply_markup=lottery_kb()
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data == "lottery_buy")
+async def lottery_buy(cb: CallbackQuery):
+    uid = cb.from_user.id
+    user = db.get_user(uid)
+    if user['balance'] < 1000:
+        await cb.answer("❌ Нужно 1000 JET!", show_alert=True)
+        return
+    
+    db.update_balance(uid, -1000)
+    ticket_num = random.randint(1, 1000000)
+    draw_id = int(datetime.now().timestamp()) // 3600
+    db.add_lottery_ticket(uid, ticket_num, draw_id)
+    
+    await cb.message.edit_text(
+        f"🎫 *Билет куплен!*\n\nНомер: {ticket_num}\nТираж: {draw_id}\nУдачи! 🍀",
+        reply_markup=lottery_kb()
+    )
     await cb.answer()
 
 # ==================== НОВОСТИ ====================
@@ -1667,8 +2283,11 @@ async def help_cb(cb: CallbackQuery):
         "💀 *Краш* — актив может упасть на 30-90%\n"
         "🔒 *Стейкинг* — 10% за 8ч\n"
         "🌾 *Ферма* — пассивный доход\n"
-        "🔄 *P2P* — торгуй с другими игроками\n"
-        "🏅 *Турниры* — соревнуйся за призы\n"
+        "🔄 *P2P* — торгуй с другими\n"
+        "🏅 *Квесты* — задания с наградами\n"
+        "🏪 *Магазин* — бустеры и улучшения\n"
+        "🏦 *Банк* — 5% в день\n"
+        "🎰 *Лотерея* — выиграй джекпот\n"
         "🎁 *Дейли* — бонус каждый день\n"
         "👥 *Рефералы* — приводи друзей"
     )
@@ -1732,97 +2351,6 @@ async def update_tournaments(uid: int, profit: Decimal):
     for (tid,) in ts:
         db.update_tournament_profit(tid, uid, profit)
     conn.close()
-
-# ==================== ФЕРМА ====================
-@dp.callback_query(F.data == "farm")
-async def farm_cb(cb: CallbackQuery):
-    await show_farm(cb.from_user.id, cb.message)
-    await cb.answer()
-
-async def show_farm(uid: int, msg: types.Message):
-    level, exp, last = db.get_farm(uid)
-    exp_needed = level * 100 + 50
-    income = Decimal('1') * (Decimal('1.1') ** level)
-    
-    # Пассивный доход
-    now = int(datetime.now().timestamp())
-    if last > 0:
-        elapsed = (now - last) // 3600
-        available = income * Decimal(elapsed) if elapsed > 0 else Decimal('0')
-    else:
-        available = Decimal('0')
-    
-    text = (
-        f"🌾 *Ферма*\n\n"
-        f"Уровень: {level}\n"
-        f"Опыт: {exp:.0f}/{exp_needed}\n"
-        f"Доход: {income:.2f} JET/час\n"
-        f"Доступно к сбору: {available:.2f} JET"
-    )
-    await msg.edit_text(text, reply_markup=farm_kb())
-
-@dp.callback_query(F.data == "farm_claim")
-async def farm_claim(cb: CallbackQuery):
-    uid = cb.from_user.id
-    level, exp, last = db.get_farm(uid)
-    income = Decimal('1') * (Decimal('1.1') ** level)
-    now = int(datetime.now().timestamp())
-    if last > 0:
-        elapsed = (now - last) // 3600
-        if elapsed > 0:
-            amount = income * Decimal(elapsed)
-            db.update_balance(uid, amount)
-            db.update_farm(uid, level, exp, now)
-            await cb.message.edit_text(
-                f"🌾 *Урожай собран!*\n\n+{amount:.2f} JET",
-                reply_markup=farm_kb()
-            )
-            await cb.answer()
-            return
-    await cb.answer("🌾 Ещё ничего не выросло!", show_alert=True)
-
-@dp.callback_query(F.data == "farm_upgrade")
-async def farm_upgrade(cb: CallbackQuery):
-    uid = cb.from_user.id
-    level, exp, last = db.get_farm(uid)
-    exp_needed = level * 100 + 50
-    if exp >= exp_needed:
-        db.update_farm(uid, level + 1, Decimal('0'), last)
-        await cb.message.edit_text(
-            f"⬆️ *Ферма улучшена!*\n\nУровень {level} → {level+1}",
-            reply_markup=farm_kb()
-        )
-        await cb.answer()
-    else:
-        await cb.answer(f"❌ Нужно {exp_needed - exp:.0f} опыта!", show_alert=True)
-
-@dp.callback_query(F.data == "farm_info")
-async def farm_info(cb: CallbackQuery):
-    await show_farm(cb.from_user.id, cb.message)
-    await cb.answer()
-
-# ==================== P2P ====================
-@dp.callback_query(F.data == "p2p")
-async def p2p_cb(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "🔄 *P2P-биржа*\n\n"
-        "Торгуй напрямую с другими игроками!",
-        reply_markup=p2p_kb()
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data == "p2p_all")
-async def p2p_all(cb: CallbackQuery):
-    offers = db.get_p2p_offers()
-    text = "📊 *Все ордера:*\n\n"
-    if offers:
-        for o in offers[:10]:
-            emoji = "📈" if o['type'] == 'buy' else "📉"
-            text += f"{emoji} {o['asset']} {o['amount']:.2f} @ {o['price']:.2f} — @{db.get_user(o['user_id'])['username']}\n"
-    else:
-        text += "❌ Нет активных ордеров"
-    await cb.message.edit_text(text, reply_markup=p2p_kb())
-    await cb.answer()
 
 # ==================== ДОСТИЖЕНИЯ ====================
 async def check_achievements(uid: int, msg: types.Message):
@@ -1970,12 +2498,48 @@ async def farm_passive():
             logger.error(f"Farm passive: {e}")
             await asyncio.sleep(3600)
 
+async def lottery_draw():
+    """Розыгрыш лотереи каждый час"""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Каждый час
+            
+            draw_id = int(datetime.now().timestamp()) // 3600
+            winning_num = random.randint(1, 1000000)
+            
+            conn = db.get_conn()
+            c = conn.cursor()
+            c.execute('''
+                SELECT user_id FROM lottery_tickets 
+                WHERE draw_id = ? AND ticket_number = ?
+            ''', (draw_id - 1, winning_num))
+            winners = c.fetchall()
+            conn.close()
+            
+            if winners:
+                prize = 100000  # Джекпот
+                for (uid,) in winners:
+                    db.update_balance(uid, Decimal(str(prize)))
+                    await bot.send_message(
+                        uid,
+                        f"🎉 *ТЫ ВЫИГРАЛ В ЛОТЕРЕЕ!*\n\n"
+                        f"Билет: {winning_num}\n"
+                        f"Приз: {prize:.0f} JET! 🍀",
+                        reply_markup=main_kb()
+                    )
+                logger.info(f"Lottery winner: {winners[0][0]} with ticket {winning_num}")
+                
+        except Exception as e:
+            logger.error(f"Lottery draw: {e}")
+            await asyncio.sleep(60)
+
 # ==================== ЗАПУСК ====================
 async def main():
     asyncio.create_task(update_prices())
     asyncio.create_task(check_stakes())
     asyncio.create_task(update_vip())
     asyncio.create_task(farm_passive())
+    asyncio.create_task(lottery_draw())
     
     logger.info("🚀 Bot started!")
     await dp.start_polling(bot)
