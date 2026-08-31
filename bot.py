@@ -26,7 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = "8972234129:AAGJp795dnJh8ez2_k1-YgqjQwJ99ENdgv8"  # ЗАМЕНИТЬ НА СВОЙ ТОКЕН!
-ADMIN_IDS = [5356400377]  # ID администраторов (можно узнать через /id)
+ADMIN_IDS = [5356400377] # ID администраторов (можно узнать через /id)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
