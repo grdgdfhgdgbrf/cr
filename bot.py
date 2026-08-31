@@ -1,2547 +1,1506 @@
-# bot.py
-import asyncio
-import random
-import sqlite3
-import json
-import logging
-import os
-import math
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-from decimal import Decimal, getcontext
-from collections import defaultdict
+"""
+TELEGRAM БОТ ДЛЯ ЧАТА - БОССЫ И РЕЙДЫ
+Версия 1.0
+Как установить:
+1. pip install aiogram sqlite3 apscheduler
+2. Заменить TOKEN на свой токен от @BotFather
+3. Запустить: python bot.py
+4. Добавить бота в чат и дать права администратора (для отправки сообщений)
+"""
 
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+import asyncio
+import sqlite3
+import random
+import json
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Tuple
+import logging
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
-    InputFile, BufferedInputFile
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-# Настройка точности
-getcontext().prec = 12
-load_dotenv()
+# ========== НАСТРОЙКИ ==========
+TOKEN = "8972234129:AAGJp795dnJh8ez2_k1-YgqjQwJ99ENdgv8"  # ЗАМЕНИТЬ НА СВОЙ ТОКЕН!
+ADMIN_IDS = [5356400377]  # ID администраторов (можно узнать через /id)
 
-# ==================== ЛОГИРОВАНИЕ ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN not found!")
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+scheduler = AsyncIOScheduler()
 
-# ==================== КОНФИГУРАЦИЯ ====================
-class Config:
-    # Торговля
-    COMMISSION = Decimal('0.005')
-    UPDATE_INTERVAL = 45
-    MAX_LEVERAGE = 10
-    MIN_TRADE = Decimal('0.1')
-    MAX_TRADE = Decimal('1000000')
-    
-    # Стейкинг
-    STAKE_PERCENT = Decimal('10')
-    STAKE_HOURS = 8
-    MIN_STAKE = Decimal('10')
-    MAX_STAKE = Decimal('1000000')
-    
-    # Бонусы
-    REFERRAL_BONUS = Decimal('1000')
-    DAILY_BONUSES = [100, 200, 400, 700, 1200, 2000, 3500, 5000, 7500, 10000]
-    
-    # Краш
-    CRASH_COOLDOWN = 180
-    CRASH_MIN = 30
-    CRASH_MAX = 90
-    
-    # Рост
-    GROWTH_MIN = Decimal('1.05')
-    GROWTH_MAX = Decimal('1.30')
-    PRICE_START = Decimal('100')
-    PRICE_MAX = Decimal('9999999')
-    
-    # Игрок
-    START_BALANCE = Decimal('50000')
-    START_LEVEL = 1
-    START_EXP = 0
-    
-    # VIP
-    VIP_LEVELS = {
-        0: {'name': 'Новичок', 'bonus': 0, 'color': '⬜', 'min_deposit': 0},
-        1: {'name': 'Бронза', 'bonus': 2, 'color': '🥉', 'min_deposit': 10000},
-        2: {'name': 'Серебро', 'bonus': 5, 'color': '🥈', 'min_deposit': 50000},
-        3: {'name': 'Золото', 'bonus': 10, 'color': '🥇', 'min_deposit': 200000},
-        4: {'name': 'Платина', 'bonus': 15, 'color': '💎', 'min_deposit': 1000000},
-        5: {'name': 'Алмаз', 'bonus': 25, 'color': '👑', 'min_deposit': 5000000}
-    }
-    
-    # Уровни игрока
-    LEVEL_EXP = [0, 100, 250, 500, 1000, 2000, 3500, 5500, 8000, 12000, 18000, 25000, 35000, 50000, 75000, 100000]
-    
-    # Магазин
-    SHOP_ITEMS = {
-        'booster_2h': {'name': 'Бустер x2 (2ч)', 'price': 5000, 'emoji': '⚡', 'type': 'booster', 'duration': 7200},
-        'booster_12h': {'name': 'Бустер x2 (12ч)', 'price': 20000, 'emoji': '🔥', 'type': 'booster', 'duration': 43200},
-        'insurance': {'name': 'Страховка краша', 'price': 10000, 'emoji': '🛡️', 'type': 'insurance', 'duration': 3600},
-        'vip_pass': {'name': 'VIP-пропуск (24ч)', 'price': 50000, 'emoji': '💎', 'type': 'vip', 'duration': 86400},
-        'farm_boost': {'name': 'Ускоритель фермы', 'price': 15000, 'emoji': '🌾', 'type': 'farm_boost', 'duration': 3600},
-        'lucky_coin': {'name': 'Счастливая монета', 'price': 25000, 'emoji': '🍀', 'type': 'lucky', 'uses': 5},
-        'crypto_key': {'name': 'Крипто-ключ', 'price': 100000, 'emoji': '🔑', 'type': 'key', 'uses': 1}
-    }
-
-# Активы
-ASSETS = {
-    'PEPE': {
-        'name': 'PEPE', 'emoji': '🐸', 'color': '🟢',
-        'initial': Decimal('100'), 'crash_risk': 5,
-        'volatility': Decimal('0.06'), 'growth': Decimal('1.3'),
-        'rarity': 'common'
-    },
-    'DOGE': {
-        'name': 'DOGE', 'emoji': '🐕', 'color': '🔵',
-        'initial': Decimal('50'), 'crash_risk': 12,
-        'volatility': Decimal('0.12'), 'growth': Decimal('1.4'),
-        'rarity': 'uncommon'
-    },
-    'SHIB': {
-        'name': 'SHIB', 'emoji': '🔥', 'color': '🔴',
-        'initial': Decimal('1'), 'crash_risk': 20,
-        'volatility': Decimal('0.20'), 'growth': Decimal('1.5'),
-        'rarity': 'rare'
-    },
-    'FLOKI': {
-        'name': 'FLOKI', 'emoji': '⚡', 'color': '🟡',
-        'initial': Decimal('10'), 'crash_risk': 15,
-        'volatility': Decimal('0.18'), 'growth': Decimal('1.45'),
-        'rarity': 'rare'
-    },
-    'BONK': {
-        'name': 'BONK', 'emoji': '🐶', 'color': '🟣',
-        'initial': Decimal('0.1'), 'crash_risk': 30,
-        'volatility': Decimal('0.30'), 'growth': Decimal('1.6'),
-        'rarity': 'epic'
-    }
-}
-
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-
-# ==================== FSM ====================
-class TradeFSM(StatesGroup):
-    asset = State()
-    amount = State()
-    confirm = State()
-    limit_buy = State()
-    limit_sell = State()
-
-class StakeFSM(StatesGroup):
-    amount = State()
-
-class CrashFSM(StatesGroup):
-    asset = State()
-    amount = State()
-
-class ShopFSM(StatesGroup):
-    item = State()
-    confirm = State()
-
-class QuestFSM(StatesGroup):
-    claim = State()
-
-class TransferFSM(StatesGroup):
-    user = State()
-    amount = State()
-
-# ==================== БАЗА ДАННЫХ ====================
+# ========== БАЗА ДАННЫХ ==========
 class Database:
-    def __init__(self, db_name='crypto_bot.db'):
-        self.db_name = db_name
-        self.init_db()
-
-    def get_conn(self):
-        return sqlite3.connect(self.db_name)
-
-    def init_db(self):
-        conn = self.get_conn()
-        c = conn.cursor()
-
-        # ========== ОСНОВНЫЕ ТАБЛИЦЫ ==========
-        # Users
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS users (
+    def __init__(self, db_name="boss_bot.db"):
+        self.conn = sqlite3.connect(db_name, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self.init_tables()
+    
+    def init_tables(self):
+        # Таблица игроков
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS players (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
-                balance REAL DEFAULT 50000.0,
-                vip_level INTEGER DEFAULT 0,
-                referral_count INTEGER DEFAULT 0,
-                last_daily TEXT,
-                daily_streak INTEGER DEFAULT 0,
-                total_earned REAL DEFAULT 0.0,
-                stake_amount REAL DEFAULT 0.0,
-                stake_time INTEGER DEFAULT 0,
-                leverage INTEGER DEFAULT 1,
-                last_activity INTEGER,
-                total_trades INTEGER DEFAULT 0,
-                win_trades INTEGER DEFAULT 0,
-                farm_level INTEGER DEFAULT 0,
-                farm_exp REAL DEFAULT 0.0,
-                farm_last_claim INTEGER DEFAULT 0,
-                total_deposit REAL DEFAULT 0.0,
-                withdrawable REAL DEFAULT 0.0,
+                first_name TEXT,
                 level INTEGER DEFAULT 1,
-                exp REAL DEFAULT 0.0,
+                exp INTEGER DEFAULT 0,
+                exp_to_next INTEGER DEFAULT 100,
+                coins INTEGER DEFAULT 50,
                 crystals INTEGER DEFAULT 0,
-                premium_until INTEGER DEFAULT 0
+                attack INTEGER DEFAULT 10,
+                defense INTEGER DEFAULT 5,
+                max_hp INTEGER DEFAULT 100,
+                current_hp INTEGER DEFAULT 100,
+                total_damage INTEGER DEFAULT 0,
+                boss_kills INTEGER DEFAULT 0,
+                dungeon_completed INTEGER DEFAULT 0,
+                last_attack_time DATETIME,
+                last_heal_time DATETIME,
+                join_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_banned BOOLEAN DEFAULT FALSE,
+                warnings INTEGER DEFAULT 0
             )
         ''')
-
-        # Portfolio
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS portfolio (
+        
+        # Таблица боссов
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bosses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                display_name TEXT,
+                max_hp INTEGER,
+                current_hp INTEGER,
+                reward_coins INTEGER,
+                reward_exp INTEGER,
+                min_players INTEGER DEFAULT 1,
+                phase INTEGER DEFAULT 0,
+                is_active BOOLEAN DEFAULT FALSE,
+                spawn_time DATETIME,
+                kill_time DATETIME,
+                total_kills INTEGER DEFAULT 0,
+                abilities TEXT,  -- JSON
+                image_url TEXT
+            )
+        ''')
+        
+        # Участники битвы с боссом
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS boss_participants (
+                boss_id INTEGER,
                 user_id INTEGER,
-                asset TEXT,
-                amount REAL DEFAULT 0.0,
-                avg_price REAL DEFAULT 0.0,
-                FOREIGN KEY (user_id) REFERENCES users(user_id),
-                UNIQUE(user_id, asset)
+                damage_dealt INTEGER DEFAULT 0,
+                joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_alive BOOLEAN DEFAULT TRUE,
+                heal_used INTEGER DEFAULT 0,
+                PRIMARY KEY (boss_id, user_id),
+                FOREIGN KEY (boss_id) REFERENCES bosses(id),
+                FOREIGN KEY (user_id) REFERENCES players(user_id)
             )
         ''')
-
-        # ========== ЭКОНОМИКА ==========
-        # Prices
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS prices (
-                asset TEXT PRIMARY KEY,
-                price REAL,
-                timestamp INTEGER,
-                change_24h REAL DEFAULT 0.0,
-                volume REAL DEFAULT 0.0
-            )
-        ''')
-
-        # Price history
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS price_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                asset TEXT,
-                price REAL,
-                timestamp INTEGER
-            )
-        ''')
-
-        # Transactions
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                type TEXT,
-                asset TEXT,
-                amount REAL,
-                price REAL,
-                profit REAL DEFAULT 0.0,
-                timestamp INTEGER
-            )
-        ''')
-
-        # ========== КРАШ-СТАВКИ ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS crash_bets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                asset TEXT,
-                bet_type TEXT,
-                amount REAL,
-                coefficient REAL,
-                status TEXT,
-                result REAL,
-                timestamp INTEGER
-            )
-        ''')
-
-        # ========== РЕФЕРАЛЫ ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS referrals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                referrer_id INTEGER,
-                new_user_id INTEGER,
-                timestamp INTEGER
-            )
-        ''')
-
-        # ========== ДОСТИЖЕНИЯ ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS achievements (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                achievement_id INTEGER,
-                timestamp INTEGER,
-                UNIQUE(user_id, achievement_id)
-            )
-        ''')
-
-        # ========== P2P ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS p2p_offers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                asset TEXT,
-                amount REAL,
-                price REAL,
-                type TEXT,
-                status TEXT,
-                timestamp INTEGER
-            )
-        ''')
-
-        # ========== ТУРНИРЫ ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS tournaments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                prize REAL,
-                start_time INTEGER,
-                end_time INTEGER,
-                status TEXT,
-                participants INTEGER DEFAULT 0
-            )
-        ''')
-
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS tournament_participants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tournament_id INTEGER,
-                user_id INTEGER,
-                profit REAL DEFAULT 0.0,
-                rank INTEGER DEFAULT 0
-            )
-        ''')
-
-        # ========== МАГАЗИН ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS inventory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                item_id TEXT,
-                quantity INTEGER DEFAULT 1,
-                expires_at INTEGER DEFAULT 0,
-                uses_left INTEGER DEFAULT 0,
-                UNIQUE(user_id, item_id)
-            )
-        ''')
-
-        # ========== КВЕСТЫ ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS quests (
+        
+        # Таблица предметов магазина
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS shop_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT,
                 description TEXT,
-                objective_type TEXT,
-                objective_count INTEGER,
-                reward REAL,
-                reward_crystals INTEGER,
-                reset_daily INTEGER DEFAULT 0
+                category TEXT,  -- weapon, armor, potion, boost
+                attack_bonus INTEGER DEFAULT 0,
+                defense_bonus INTEGER DEFAULT 0,
+                heal_amount INTEGER DEFAULT 0,
+                price_coins INTEGER,
+                price_crystals INTEGER DEFAULT 0,
+                level_required INTEGER DEFAULT 1,
+                emoji TEXT,
+                is_available BOOLEAN DEFAULT TRUE
             )
         ''')
-
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS quest_progress (
+        
+        # Инвентарь игрока
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS inventory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
-                quest_id INTEGER,
-                progress INTEGER DEFAULT 0,
-                completed INTEGER DEFAULT 0,
-                last_claim INTEGER DEFAULT 0,
-                UNIQUE(user_id, quest_id)
+                item_id INTEGER,
+                quantity INTEGER DEFAULT 1,
+                equipped BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (user_id) REFERENCES players(user_id),
+                FOREIGN KEY (item_id) REFERENCES shop_items(id)
             )
         ''')
-
-        # ========== ЕЖЕДНЕВНЫЕ ЗАДАНИЯ ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS daily_tasks (
+        
+        # Данжи
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS dungeons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                task_date TEXT,
-                task1_done INTEGER DEFAULT 0,
-                task2_done INTEGER DEFAULT 0,
-                task3_done INTEGER DEFAULT 0,
-                claimed INTEGER DEFAULT 0
+                name TEXT,
+                difficulty INTEGER,
+                level_required INTEGER DEFAULT 1,
+                min_players INTEGER DEFAULT 1,
+                max_players INTEGER DEFAULT 4,
+                enemies TEXT,  -- JSON
+                boss_name TEXT,
+                reward_coins INTEGER,
+                reward_exp INTEGER,
+                cooldown_minutes INTEGER DEFAULT 60
             )
         ''')
-
-        # ========== СИСТЕМА РЕЙТИНГА ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS rating_history (
+        
+        # Гильдии
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS guilds (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                leader_id INTEGER,
+                coins INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                total_damage INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (leader_id) REFERENCES players(user_id)
+            )
+        ''')
+        
+        # Члены гильдий
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS guild_members (
+                guild_id INTEGER,
                 user_id INTEGER,
-                rating INTEGER DEFAULT 1000,
-                timestamp INTEGER
+                role TEXT DEFAULT 'member',  -- leader, officer, member
+                joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id),
+                FOREIGN KEY (guild_id) REFERENCES guilds(id),
+                FOREIGN KEY (user_id) REFERENCES players(user_id)
             )
         ''')
-
-        # ========== БАНК ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS bank_accounts (
-                user_id INTEGER PRIMARY KEY,
-                balance REAL DEFAULT 0.0,
-                last_interest INTEGER DEFAULT 0
-            )
-        ''')
-
-        # ========== ЛОТЕРЕЯ ==========
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS lottery_tickets (
+        
+        # Логи администраторов
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS admin_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                ticket_number INTEGER,
-                draw_id INTEGER,
-                timestamp INTEGER
+                admin_id INTEGER,
+                action TEXT,
+                target_id INTEGER,
+                details TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-
-        # ========== ИНИЦИАЛИЗАЦИЯ ==========
-        # Init prices
-        for asset, data in ASSETS.items():
-            c.execute('''
-                INSERT OR IGNORE INTO prices (asset, price, timestamp)
-                VALUES (?, ?, ?)
-            ''', (asset, float(data['initial']), int(datetime.now().timestamp())))
-
-        # Init quests
-        c.execute('SELECT COUNT(*) FROM quests')
-        if c.fetchone()[0] == 0:
-            default_quests = [
-                ('Первая сделка', 'Соверши свою первую покупку', 'trade', 1, 500, 0, 0),
-                ('Торговец', 'Соверши 10 сделок', 'trade', 10, 2000, 5, 0),
-                ('Профи', 'Соверши 50 сделок', 'trade', 50, 10000, 20, 0),
-                ('Краш-босс', 'Выиграй 5 ставок на краше', 'crash_win', 5, 3000, 10, 0),
-                ('Фермер', 'Собери урожай 3 раза', 'farm_claim', 3, 1500, 5, 0),
-                ('Инвестор', 'Имей 3 разных актива', 'assets_count', 3, 5000, 15, 0),
-                ('Миллионер', 'Заработай 1 000 000 JET', 'earn', 1000000, 50000, 50, 0),
-                ('Ежедневный игрок', 'Заходи в бота 7 дней подряд', 'daily_streak', 7, 7000, 10, 1)
-            ]
-            for q in default_quests:
-                c.execute('''
-                    INSERT INTO quests (name, description, objective_type, objective_count, reward, reward_crystals, reset_daily)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', q)
-
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized")
-
-    # ========== GETTERS ==========
-    def get_price(self, asset: str) -> Decimal:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT price FROM prices WHERE asset = ?', (asset,))
-        r = c.fetchone()
-        conn.close()
-        return Decimal(str(r[0])) if r else ASSETS[asset]['initial']
-
-    def get_price_history(self, asset: str, limit: int = 30) -> List[Decimal]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            SELECT price FROM price_history 
-            WHERE asset = ? ORDER BY timestamp DESC LIMIT ?
-        ''', (asset, limit))
-        r = c.fetchall()
-        conn.close()
-        return [Decimal(str(x[0])) for x in r[::-1]]
-
-    def get_user(self, user_id: int) -> Optional[Dict]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        if r:
-            cols = ['user_id', 'username', 'balance', 'vip_level', 'referral_count',
-                   'last_daily', 'daily_streak', 'total_earned', 'stake_amount',
-                   'stake_time', 'leverage', 'last_activity', 'total_trades',
-                   'win_trades', 'farm_level', 'farm_exp', 'farm_last_claim',
-                   'total_deposit', 'withdrawable', 'level', 'exp', 'crystals', 'premium_until']
-            data = dict(zip(cols, r))
-            for k in ['balance', 'total_earned', 'stake_amount', 'farm_exp',
-                     'total_deposit', 'withdrawable', 'exp']:
-                data[k] = Decimal(str(data[k]))
-            return data
+        
+        self.conn.commit()
+        self.init_default_data()
+    
+    def init_default_data(self):
+        # Создание стандартных боссов
+        default_bosses = [
+            {
+                "name": "zombie_king",
+                "display_name": "🧟 Король Зомби",
+                "max_hp": 50000,
+                "reward_coins": 100,
+                "reward_exp": 50,
+                "min_players": 3,
+                "abilities": json.dumps({
+                    "phase_1": {"hp_range": "70-100", "ability": "Обычные атаки"},
+                    "phase_2": {"hp_range": "40-70", "ability": "Вызывает зомби - уменьшает урон игроков на 20%"},
+                    "phase_3": {"hp_range": "10-40", "ability": "Регенерация 100 HP в минуту"},
+                    "phase_4": {"hp_range": "0-10", "ability": "Ярость - удваивает урон"}
+                })
+            },
+            {
+                "name": "dragon",
+                "display_name": "🐉 Огненный Дракон",
+                "max_hp": 1000000,
+                "reward_coins": 500,
+                "reward_exp": 200,
+                "min_players": 5,
+                "abilities": json.dumps({
+                    "phase_1": {"hp_range": "70-100", "ability": "Атакует всех игроков (-10 HP)"},
+                    "phase_2": {"hp_range": "40-70", "ability": "Огненное дыхание - блокирует 3 игроков на 2 минуты"},
+                    "phase_3": {"hp_range": "10-40", "ability": "Поджигает чат - спам сообщений"},
+                    "phase_4": {"hp_range": "0-10", "ability": "Апокалипсис - x3 урон"}
+                })
+            },
+            {
+                "name": "demon_lord",
+                "display_name": "👹 Повелитель Демонов",
+                "max_hp": 200000,
+                "reward_coins": 250,
+                "reward_exp": 100,
+                "min_players": 4,
+                "abilities": json.dumps({
+                    "phase_1": {"hp_range": "70-100", "ability": "Темная магия - 20% шанс промаха"},
+                    "phase_2": {"hp_range": "40-70", "ability": "Призыв демонов - нужно убить 3 миньонов"},
+                    "phase_3": {"hp_range": "10-40", "ability": "Исцеление - +5% HP раз в 3 минуты"},
+                    "phase_4": {"hp_range": "0-10", "ability": "Безумие - атакует всех в 2 раза чаще"}
+                })
+            },
+            {
+                "name": "mecha_giant",
+                "display_name": "🤖 Меха-Гигант",
+                "max_hp": 2000000,
+                "reward_coins": 2000,
+                "reward_exp": 500,
+                "min_players": 10,
+                "abilities": json.dumps({
+                    "phase_1": {"hp_range": "70-100", "ability": "Лазерный луч - -50 HP случайному игроку"},
+                    "phase_2": {"hp_range": "40-70", "ability": "Ракетный удар - все теряют 20% текущего HP"},
+                    "phase_3": {"hp_range": "10-40", "ability": "Энергетический щит - урон уменьшен на 50%"},
+                    "phase_4": {"hp_range": "0-10", "ability": "Самоуничтожение - нужно нанести 50000 урона за 5 минут"}
+                })
+            }
+        ]
+        
+        for boss in default_bosses:
+            self.cursor.execute('''
+                INSERT OR IGNORE INTO bosses 
+                (name, display_name, max_hp, current_hp, reward_coins, reward_exp, min_players, abilities)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                boss["name"],
+                boss["display_name"],
+                boss["max_hp"],
+                boss["max_hp"],
+                boss["reward_coins"],
+                boss["reward_exp"],
+                boss["min_players"],
+                boss["abilities"]
+            ))
+        
+        # Создание стандартных предметов магазина
+        default_items = [
+            {"name": "Деревянный меч", "desc": "Обычное оружие новичка", "cat": "weapon", "atk": 5, "price": 50, "emoji": "🗡️"},
+            {"name": "Стальной клинок", "desc": "Надежное оружие", "cat": "weapon", "atk": 15, "price": 300, "level": 5, "emoji": "⚔️"},
+            {"name": "Огненный меч", "desc": "Горит в руках врага", "cat": "weapon", "atk": 35, "price": 1500, "level": 10, "emoji": "🔥"},
+            {"name": "Легендарный клинок", "desc": "Оружие героев", "cat": "weapon", "atk": 75, "price": 10000, "level": 20, "emoji": "⚡"},
+            {"name": "Кожаная броня", "desc": "Легкая защита", "cat": "armor", "def": 3, "price": 30, "emoji": "🛡️"},
+            {"name": "Кольчуга", "desc": "Крепкая защита", "cat": "armor", "def": 10, "price": 200, "level": 5, "emoji": "🛡️"},
+            {"name": "Стальная броня", "desc": "Тяжелая броня", "cat": "armor", "def": 25, "price": 1000, "level": 10, "emoji": "🛡️"},
+            {"name": "Малое зелье HP", "desc": "Восстанавливает 30 HP", "cat": "potion", "heal": 30, "price": 40, "emoji": "🧪"},
+            {"name": "Большое зелье HP", "desc": "Восстанавливает 80 HP", "cat": "potion", "heal": 80, "price": 150, "emoji": "🧪"},
+            {"name": "Эликсир силы", "desc": "+50% урона на 10 минут", "cat": "boost", "atk": 50, "price": 200, "emoji": "💪"},
+            {"name": "Щит защиты", "desc": "Уменьшает урон на 50% на 5 минут", "cat": "boost", "def": 50, "price": 250, "emoji": "🛡️"}
+        ]
+        
+        for item in default_items:
+            self.cursor.execute('''
+                INSERT OR IGNORE INTO shop_items 
+                (name, description, category, attack_bonus, defense_bonus, heal_amount, 
+                 price_coins, level_required, emoji)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                item["name"],
+                item["desc"],
+                item["cat"],
+                item.get("atk", 0),
+                item.get("def", 0),
+                item.get("heal", 0),
+                item["price"],
+                item.get("level", 1),
+                item.get("emoji", "📦")
+            ))
+        
+        self.conn.commit()
+    
+    # ===== МЕТОДЫ ДЛЯ ИГРОКОВ =====
+    def get_player(self, user_id: int) -> Optional[tuple]:
+        self.cursor.execute("SELECT * FROM players WHERE user_id = ?", (user_id,))
+        return self.cursor.fetchone()
+    
+    def register_player(self, user_id: int, username: str = None, first_name: str = None):
+        self.cursor.execute('''
+            INSERT OR IGNORE INTO players (user_id, username, first_name)
+            VALUES (?, ?, ?)
+        ''', (user_id, username, first_name))
+        self.conn.commit()
+    
+    def update_player_stats(self, user_id: int, field: str, value):
+        self.cursor.execute(
+            f"UPDATE players SET {field} = ? WHERE user_id = ?",
+            (value, user_id)
+        )
+        self.conn.commit()
+    
+    def add_exp(self, user_id: int, amount: int):
+        self.cursor.execute("SELECT level, exp, exp_to_next FROM players WHERE user_id = ?", (user_id,))
+        level, exp, exp_to_next = self.cursor.fetchone()
+        
+        exp += amount
+        level_up = False
+        
+        while exp >= exp_to_next:
+            exp -= exp_to_next
+            level += 1
+            exp_to_next = level * 100
+            level_up = True
+        
+        self.cursor.execute('''
+            UPDATE players SET level = ?, exp = ?, exp_to_next = ?
+            WHERE user_id = ?
+        ''', (level, exp, exp_to_next, user_id))
+        self.conn.commit()
+        
+        return level_up, level
+    
+    def add_coins(self, user_id: int, amount: int):
+        self.cursor.execute(
+            "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+            (amount, user_id)
+        )
+        self.conn.commit()
+    
+    # ===== МЕТОДЫ ДЛЯ БОССОВ =====
+    def get_active_boss(self) -> Optional[dict]:
+        self.cursor.execute('''
+            SELECT * FROM bosses WHERE is_active = TRUE AND current_hp > 0
+        ''')
+        boss = self.cursor.fetchone()
+        
+        if boss:
+            return {
+                "id": boss[0],
+                "name": boss[1],
+                "display_name": boss[2],
+                "max_hp": boss[3],
+                "current_hp": boss[4],
+                "reward_coins": boss[5],
+                "reward_exp": boss[6],
+                "min_players": boss[7],
+                "phase": boss[8],
+                "is_active": boss[9],
+                "abilities": json.loads(boss[12]) if boss[12] else {},
+                "image_url": boss[13]
+            }
         return None
-
-    def get_portfolio(self, user_id: int) -> Dict[str, Dict]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT asset, amount, avg_price FROM portfolio WHERE user_id = ?', (user_id,))
-        r = c.fetchall()
-        conn.close()
-        return {x[0]: {'amount': Decimal(str(x[1])), 'avg_price': Decimal(str(x[2]))} for x in r}
-
-    def get_inventory(self, user_id: int) -> Dict[str, Dict]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT item_id, quantity, expires_at, uses_left FROM inventory WHERE user_id = ?', (user_id,))
-        r = c.fetchall()
-        conn.close()
-        return {x[0]: {'quantity': x[1], 'expires_at': x[2], 'uses_left': x[3]} for x in r}
-
-    def get_quests(self, user_id: int) -> List[Dict]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            SELECT q.id, q.name, q.description, q.objective_type, q.objective_count, 
-                   q.reward, q.reward_crystals, q.reset_daily,
-                   qp.progress, qp.completed, qp.last_claim
-            FROM quests q
-            LEFT JOIN quest_progress qp ON q.id = qp.quest_id AND qp.user_id = ?
-        ''', (user_id,))
-        r = c.fetchall()
-        conn.close()
-        result = []
-        for row in r:
-            result.append({
-                'id': row[0],
-                'name': row[1],
-                'description': row[2],
-                'type': row[3],
-                'count': row[4],
-                'reward': Decimal(str(row[5])),
-                'crystals': row[6],
-                'reset_daily': row[7],
-                'progress': row[8] or 0,
-                'completed': row[9] or 0,
-                'last_claim': row[10] or 0
-            })
-        return result
-
-    def get_rating(self, user_id: int) -> int:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT rating FROM rating_history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        return r[0] if r else 1000
-
-    def get_bank_balance(self, user_id: int) -> Decimal:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT balance FROM bank_accounts WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        return Decimal(str(r[0])) if r else Decimal('0')
-
-    # ========== SETTERS ==========
-    def update_price(self, asset: str, price: Decimal):
-        conn = self.get_conn()
-        c = conn.cursor()
-        ts = int(datetime.now().timestamp())
-        c.execute('UPDATE prices SET price = ?, timestamp = ? WHERE asset = ?', (float(price), ts, asset))
-        c.execute('INSERT INTO price_history (asset, price, timestamp) VALUES (?, ?, ?)', (asset, float(price), ts))
-        conn.commit()
-        conn.close()
-
-    def update_balance(self, user_id: int, amount: Decimal):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (float(amount), user_id))
-        conn.commit()
-        conn.close()
-
-    def set_balance(self, user_id: int, amount: Decimal):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE users SET balance = ? WHERE user_id = ?', (float(amount), user_id))
-        conn.commit()
-        conn.close()
-
-    def update_portfolio(self, user_id: int, asset: str, amount: Decimal, avg_price: Optional[Decimal] = None):
-        conn = self.get_conn()
-        c = conn.cursor()
-        if avg_price is not None:
-            c.execute('''
-                UPDATE portfolio SET amount = ?, avg_price = ? 
-                WHERE user_id = ? AND asset = ?
-            ''', (float(amount), float(avg_price), user_id, asset))
-        else:
-            c.execute('''
-                UPDATE portfolio SET amount = amount + ? 
-                WHERE user_id = ? AND asset = ?
-            ''', (float(amount), user_id, asset))
-        conn.commit()
-        conn.close()
-
-    def add_transaction(self, user_id: int, ttype: str, asset: str, amount: Decimal, price: Decimal, profit: Decimal = Decimal('0')):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO transactions (user_id, type, asset, amount, price, profit, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, ttype, asset, float(amount), float(price), float(profit), int(datetime.now().timestamp())))
-        if ttype == 'sell':
-            c.execute('UPDATE users SET total_trades = total_trades + 1 WHERE user_id = ?', (user_id,))
-            if profit > 0:
-                c.execute('UPDATE users SET win_trades = win_trades + 1, total_earned = total_earned + ? WHERE user_id = ?',
-                         (float(profit), user_id))
-            # Update rating
-            rating = self.get_rating(user_id)
-            new_rating = rating + int(float(profit) / 1000)
-            c.execute('INSERT INTO rating_history (user_id, rating, timestamp) VALUES (?, ?, ?)',
-                     (user_id, max(1000, new_rating), int(datetime.now().timestamp())))
-        conn.commit()
-        conn.close()
-
-    def create_user(self, user_id: int, username: str = None):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO users (user_id, username, balance, level, last_activity)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, username, float(Config.START_BALANCE), Config.START_LEVEL, int(datetime.now().timestamp())))
-        for asset in ASSETS:
-            c.execute('''
-                INSERT INTO portfolio (user_id, asset, amount, avg_price)
-                VALUES (?, ?, 0.0, 0.0)
-            ''', (user_id, asset))
-        # Init rating
-        c.execute('INSERT INTO rating_history (user_id, rating, timestamp) VALUES (?, ?, ?)',
-                 (user_id, 1000, int(datetime.now().timestamp())))
-        # Init bank
-        c.execute('INSERT INTO bank_accounts (user_id, balance, last_interest) VALUES (?, ?, ?)',
-                 (user_id, 0.0, int(datetime.now().timestamp())))
-        conn.commit()
-        conn.close()
-
-    def add_referral(self, referrer_id: int, new_user_id: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('INSERT INTO referrals (referrer_id, new_user_id, timestamp) VALUES (?, ?, ?)',
-                 (referrer_id, new_user_id, int(datetime.now().timestamp())))
-        c.execute('UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?', (referrer_id,))
-        conn.commit()
-        conn.close()
-
-    def get_referral_count(self, user_id: int) -> int:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT referral_count FROM users WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        return r[0] if r else 0
-
-    def get_all_users(self) -> List[int]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT user_id FROM users')
-        r = c.fetchall()
-        conn.close()
-        return [x[0] for x in r]
-
-    def get_total_capital(self, user_id: int) -> Decimal:
-        user = self.get_user(user_id)
-        portfolio = self.get_portfolio(user_id)
-        total = user['balance']
-        for asset, data in portfolio.items():
-            total += data['amount'] * self.get_price(asset)
-        return total
-
-    def get_rank(self, user_id: int) -> int:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT user_id FROM users ORDER BY balance DESC')
-        r = c.fetchall()
-        conn.close()
-        for i, (uid,) in enumerate(r, 1):
-            if uid == user_id:
-                return i
-        return len(r)
-
-    def get_top(self, limit: int = 10) -> List[Tuple[int, str, Decimal, Decimal]]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT user_id, username, balance, total_earned FROM users ORDER BY balance DESC LIMIT ?', (limit,))
-        r = c.fetchall()
-        conn.close()
-        return [(x[0], x[1], Decimal(str(x[2])), Decimal(str(x[3]))) for x in r]
-
-    def update_stake(self, user_id: int, amount: Decimal, stake_time: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE users SET stake_amount = ?, stake_time = ? WHERE user_id = ?',
-                 (float(amount), stake_time, user_id))
-        conn.commit()
-        conn.close()
-
-    def update_daily(self, user_id: int, streak: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        today = datetime.now().strftime('%Y-%m-%d')
-        c.execute('UPDATE users SET last_daily = ?, daily_streak = ? WHERE user_id = ?',
-                 (today, streak, user_id))
-        conn.commit()
-        conn.close()
-
-    def get_daily(self, user_id: int) -> Tuple[Optional[str], int]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT last_daily, daily_streak FROM users WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        return (r[0], r[1]) if r else (None, 0)
-
-    def get_trade_stats(self, user_id: int) -> Dict:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT total_trades, win_trades FROM users WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        return {'total': r[0] if r else 0, 'win': r[1] if r else 0}
-
-    def get_vip_level(self, user_id: int) -> int:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT vip_level FROM users WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        return r[0] if r else 0
-
-    def update_vip(self, user_id: int, level: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('UPDATE users SET vip_level = ? WHERE user_id = ?', (level, user_id))
-        conn.commit()
-        conn.close()
-
-    def get_weekly_top(self, limit: int = 10) -> List[Tuple[int, str, Decimal]]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        week_ago = int((datetime.now() - timedelta(days=7)).timestamp())
-        c.execute('''
-            SELECT u.user_id, u.username, SUM(t.profit) as profit
-            FROM transactions t JOIN users u ON t.user_id = u.user_id
-            WHERE t.timestamp > ? AND t.type = 'sell'
-            GROUP BY t.user_id ORDER BY profit DESC LIMIT ?
-        ''', (week_ago, limit))
-        r = c.fetchall()
-        conn.close()
-        return [(x[0], x[1], Decimal(str(x[2]) if x[2] else 0)) for x in r]
-
-    def update_farm(self, user_id: int, level: int, exp: Decimal, last_claim: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            UPDATE users SET farm_level = ?, farm_exp = ?, farm_last_claim = ?
-            WHERE user_id = ?
-        ''', (level, float(exp), last_claim, user_id))
-        conn.commit()
-        conn.close()
-
-    def get_farm(self, user_id: int) -> Tuple[int, Decimal, int]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT farm_level, farm_exp, farm_last_claim FROM users WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        if r:
-            return r[0], Decimal(str(r[1])), r[2]
-        return 0, Decimal('0'), 0
-
-    def add_inventory(self, user_id: int, item_id: str, quantity: int = 1, expires_at: int = 0, uses_left: int = 0):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO inventory (user_id, item_id, quantity, expires_at, uses_left)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + ?
-        ''', (user_id, item_id, quantity, expires_at, uses_left, quantity))
-        conn.commit()
-        conn.close()
-
-    def use_inventory(self, user_id: int, item_id: str) -> bool:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT quantity, uses_left FROM inventory WHERE user_id = ? AND item_id = ?', (user_id, item_id))
-        r = c.fetchone()
-        if not r or r[0] <= 0:
-            conn.close()
+    
+    def spawn_boss(self, boss_name: str) -> bool:
+        # Проверяем, есть ли уже активный босс
+        if self.get_active_boss():
             return False
-        new_qty = r[0] - 1
-        if r[1] > 0:
-            new_uses = r[1] - 1
-            c.execute('UPDATE inventory SET quantity = ?, uses_left = ? WHERE user_id = ? AND item_id = ?',
-                     (new_qty, new_uses, user_id, item_id))
-        else:
-            c.execute('UPDATE inventory SET quantity = ? WHERE user_id = ? AND item_id = ?',
-                     (new_qty, user_id, item_id))
-        conn.commit()
-        conn.close()
+        
+        self.cursor.execute('''
+            UPDATE bosses SET current_hp = max_hp, is_active = TRUE, 
+            spawn_time = CURRENT_TIMESTAMP, phase = 0
+            WHERE name = ?
+        ''', (boss_name,))
+        self.conn.commit()
         return True
+    
+    def get_boss_participants(self, boss_id: int) -> List[tuple]:
+        self.cursor.execute('''
+            SELECT user_id, damage_dealt FROM boss_participants 
+            WHERE boss_id = ? AND is_alive = TRUE
+            ORDER BY damage_dealt DESC
+        ''', (boss_id,))
+        return self.cursor.fetchall()
+    
+    def add_boss_participant(self, boss_id: int, user_id: int):
+        self.cursor.execute('''
+            INSERT OR IGNORE INTO boss_participants (boss_id, user_id)
+            VALUES (?, ?)
+        ''', (boss_id, user_id))
+        self.conn.commit()
+    
+    def deal_damage_to_boss(self, boss_id: int, user_id: int, damage: int) -> Tuple[bool, int]:
+        # Проверяем жив ли босс
+        self.cursor.execute("SELECT current_hp FROM bosses WHERE id = ?", (boss_id,))
+        current_hp = self.cursor.fetchone()[0]
+        
+        if current_hp <= 0:
+            return False, 0
+        
+        # Наносим урон
+        new_hp = max(0, current_hp - damage)
+        self.cursor.execute(
+            "UPDATE bosses SET current_hp = ? WHERE id = ?",
+            (new_hp, boss_id)
+        )
+        
+        # Обновляем урон игрока
+        self.cursor.execute('''
+            UPDATE boss_participants SET damage_dealt = damage_dealt + ?
+            WHERE boss_id = ? AND user_id = ?
+        ''', (damage, boss_id, user_id))
+        
+        self.conn.commit()
+        
+        # Проверяем убит ли босс
+        if new_hp == 0:
+            self.boss_killed(boss_id)
+            return True, new_hp
+        
+        # Проверяем смену фазы
+        self.check_boss_phase(boss_id)
+        
+        return False, new_hp
+    
+    def check_boss_phase(self, boss_id: int):
+        self.cursor.execute("SELECT current_hp, max_hp FROM bosses WHERE id = ?", (boss_id,))
+        current_hp, max_hp = self.cursor.fetchone()
+        hp_percent = (current_hp / max_hp) * 100
+        
+        if hp_percent <= 10:
+            phase = 4
+        elif hp_percent <= 40:
+            phase = 3
+        elif hp_percent <= 70:
+            phase = 2
+        else:
+            phase = 1
+        
+        self.cursor.execute(
+            "UPDATE bosses SET phase = ? WHERE id = ?",
+            (phase, boss_id)
+        )
+        self.conn.commit()
+    
+    def boss_killed(self, boss_id: int):
+        # Получаем информацию о боссе
+        self.cursor.execute("SELECT * FROM bosses WHERE id = ?", (boss_id,))
+        boss = self.cursor.fetchone()
+        
+        # Получаем участников
+        participants = self.get_boss_participants(boss_id)
+        
+        # Обновляем босса
+        self.cursor.execute('''
+            UPDATE bosses SET is_active = FALSE, kill_time = CURRENT_TIMESTAMP,
+            total_kills = total_kills + 1
+            WHERE id = ?
+        ''', (boss_id,))
+        
+        # Выдаем награды участникам
+        total_damage = sum(p[1] for p in participants)
+        
+        for user_id, damage in participants:
+            # Расчет награды пропорционально урону
+            share = damage / total_damage if total_damage > 0 else 0
+            coins_reward = int(boss[5] * share)
+            exp_reward = int(boss[6] * share)
+            
+            # Бонус за участие
+            if damage > 0:
+                coins_reward += 10
+                exp_reward += 5
+            
+            # Минимальная награда
+            coins_reward = max(coins_reward, 10)
+            exp_reward = max(exp_reward, 5)
+            
+            self.add_coins(user_id, coins_reward)
+            self.add_exp(user_id, exp_reward)
+            
+            # Обновляем статистику
+            self.cursor.execute('''
+                UPDATE players SET boss_kills = boss_kills + 1,
+                total_damage = total_damage + ?
+                WHERE user_id = ?
+            ''', (damage, user_id))
+        
+        self.conn.commit()
+        
+        # Возвращаем информацию для отправки сообщения
+        return {
+            "boss_name": boss[2],
+            "participants": participants,
+            "total_damage": total_damage,
+            "top_damage": participants[0] if participants else None
+        }
+    
+    # ===== МЕТОДЫ ДЛЯ МАГАЗИНА =====
+    def get_shop_items(self, category: str = None) -> List[tuple]:
+        if category:
+            self.cursor.execute(
+                "SELECT * FROM shop_items WHERE category = ? AND is_available = TRUE",
+                (category,)
+            )
+        else:
+            self.cursor.execute(
+                "SELECT * FROM shop_items WHERE is_available = TRUE"
+            )
+        return self.cursor.fetchall()
+    
+    def buy_item(self, user_id: int, item_id: int) -> Tuple[bool, str]:
+        # Проверяем наличие предмета
+        self.cursor.execute("SELECT * FROM shop_items WHERE id = ?", (item_id,))
+        item = self.cursor.fetchone()
+        
+        if not item:
+            return False, "Предмет не найден!"
+        
+        # Проверяем уровень
+        player = self.get_player(user_id)
+        if player[2] < item[8]:  # level < level_required
+            return False, f"Требуется уровень {item[8]}!"
+        
+        # Проверяем баланс
+        if player[3] < item[7]:  # coins < price_coins
+            return False, f"Недостаточно монет! Нужно: {item[7]}"
+        
+        # Списываем монеты
+        self.add_coins(user_id, -item[7])
+        
+        # Добавляем в инвентарь
+        self.cursor.execute('''
+            INSERT INTO inventory (user_id, item_id, quantity)
+            VALUES (?, ?, 1)
+            ON CONFLICT DO UPDATE SET quantity = quantity + 1
+        ''', (user_id, item_id))
+        self.conn.commit()
+        
+        return True, f"Куплено: {item[1]}!"
+    
+    def get_inventory(self, user_id: int) -> List[tuple]:
+        self.cursor.execute('''
+            SELECT i.*, s.name, s.category, s.attack_bonus, s.defense_bonus, s.emoji
+            FROM inventory i
+            JOIN shop_items s ON i.item_id = s.id
+            WHERE i.user_id = ?
+        ''', (user_id,))
+        return self.cursor.fetchall()
+    
+    def get_equipped_items(self, user_id: int) -> dict:
+        self.cursor.execute('''
+            SELECT s.category, s.attack_bonus, s.defense_bonus, s.name
+            FROM inventory i
+            JOIN shop_items s ON i.item_id = s.id
+            WHERE i.user_id = ? AND i.equipped = TRUE
+        ''', (user_id,))
+        
+        items = self.cursor.fetchall()
+        result = {"weapon": None, "armor": None}
+        
+        for item in items:
+            if item[0] == "weapon":
+                result["weapon"] = {"name": item[3], "attack": item[1]}
+            elif item[0] == "armor":
+                result["armor"] = {"name": item[3], "defense": item[2]}
+        
+        return result
+    
+    def equip_item(self, user_id: int, item_id: int) -> Tuple[bool, str]:
+        # Проверяем наличие в инвентаре
+        self.cursor.execute(
+            "SELECT * FROM inventory WHERE user_id = ? AND item_id = ? AND quantity > 0",
+            (user_id, item_id)
+        )
+        if not self.cursor.fetchone():
+            return False, "Предмет не найден в инвентаре!"
+        
+        # Получаем категорию предмета
+        self.cursor.execute("SELECT category FROM shop_items WHERE id = ?", (item_id,))
+        category = self.cursor.fetchone()[0]
+        
+        # Снимаем экипировку с других предметов той же категории
+        self.cursor.execute('''
+            UPDATE inventory SET equipped = FALSE
+            WHERE user_id = ? AND item_id IN (
+                SELECT id FROM shop_items WHERE category = ?
+            )
+        ''', (user_id, category))
+        
+        # Экипируем выбранный предмет
+        self.cursor.execute('''
+            UPDATE inventory SET equipped = TRUE
+            WHERE user_id = ? AND item_id = ?
+        ''', (user_id, item_id))
+        self.conn.commit()
+        
+        return True, "Предмет экипирован!"
+    
+    # ===== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ =====
+    def get_all_chat_ids(self) -> List[int]:
+        # Получаем все чаты, где есть бот
+        self.cursor.execute("SELECT DISTINCT chat_id FROM chat_settings")
+        return [row[0] for row in self.cursor.fetchall()]
+    
+    def add_chat(self, chat_id: int, chat_title: str = None):
+        self.cursor.execute('''
+            INSERT OR IGNORE INTO chat_settings (chat_id, chat_title)
+            VALUES (?, ?)
+        ''', (chat_id, chat_title))
+        self.conn.commit()
 
-    def update_quest_progress(self, user_id: int, quest_id: int, progress: int = 1):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO quest_progress (user_id, quest_id, progress, last_claim)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, quest_id) DO UPDATE SET progress = progress + ?
-        ''', (user_id, quest_id, progress, int(datetime.now().timestamp()), progress))
-        conn.commit()
-        conn.close()
-
-    def complete_quest(self, user_id: int, quest_id: int, reward: Decimal, crystals: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            UPDATE quest_progress SET completed = 1, last_claim = ? 
-            WHERE user_id = ? AND quest_id = ?
-        ''', (int(datetime.now().timestamp()), user_id, quest_id))
-        c.execute('UPDATE users SET balance = balance + ?, crystals = crystals + ? WHERE user_id = ?',
-                 (float(reward), crystals, user_id))
-        conn.commit()
-        conn.close()
-
-    def get_daily_tasks(self, user_id: int) -> Dict:
-        conn = self.get_conn()
-        c = conn.cursor()
-        today = datetime.now().strftime('%Y-%m-%d')
-        c.execute('''
-            SELECT task1_done, task2_done, task3_done, claimed
-            FROM daily_tasks WHERE user_id = ? AND task_date = ?
-        ''', (user_id, today))
-        r = c.fetchone()
-        conn.close()
-        if r:
-            return {'task1': r[0], 'task2': r[1], 'task3': r[2], 'claimed': r[3]}
-        return {'task1': 0, 'task2': 0, 'task3': 0, 'claimed': 0}
-
-    def update_daily_task(self, user_id: int, task_num: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        today = datetime.now().strftime('%Y-%m-%d')
-        c.execute('''
-            INSERT INTO daily_tasks (user_id, task_date, task1_done, task2_done, task3_done)
-            VALUES (?, ?, 0, 0, 0)
-            ON CONFLICT(user_id, task_date) DO NOTHING
-        ''', (user_id, today))
-        c.execute(f'UPDATE daily_tasks SET task{task_num}_done = 1 WHERE user_id = ? AND task_date = ?',
-                 (user_id, today))
-        conn.commit()
-        conn.close()
-
-    def claim_daily_tasks(self, user_id: int) -> bool:
-        conn = self.get_conn()
-        c = conn.cursor()
-        today = datetime.now().strftime('%Y-%m-%d')
-        c.execute('''
-            SELECT task1_done, task2_done, task3_done, claimed
-            FROM daily_tasks WHERE user_id = ? AND task_date = ?
-        ''', (user_id, today))
-        r = c.fetchone()
-        if not r or r[3] == 1:
-            conn.close()
-            return False
-        done = r[0] + r[1] + r[2]
-        if done >= 2:  # Минимум 2 задания для награды
-            reward = 500 + (done - 2) * 300
-            c.execute('UPDATE daily_tasks SET claimed = 1 WHERE user_id = ? AND task_date = ?', (user_id, today))
-            c.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (reward, user_id))
-            conn.commit()
-            conn.close()
-            return True
-        conn.close()
-        return False
-
-    def add_achievement(self, user_id: int, ach_id: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('INSERT OR IGNORE INTO achievements (user_id, achievement_id, timestamp) VALUES (?, ?, ?)',
-                 (user_id, ach_id, int(datetime.now().timestamp())))
-        conn.commit()
-        conn.close()
-
-    def get_achievements(self, user_id: int) -> List[int]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT achievement_id FROM achievements WHERE user_id = ?', (user_id,))
-        r = c.fetchall()
-        conn.close()
-        return [x[0] for x in r]
-
-    def update_bank_interest(self, user_id: int, interest: Decimal):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            UPDATE bank_accounts SET balance = balance + ?, last_interest = ?
-            WHERE user_id = ?
-        ''', (float(interest), int(datetime.now().timestamp()), user_id))
-        conn.commit()
-        conn.close()
-
-    def get_bank(self, user_id: int) -> Tuple[Decimal, int]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT balance, last_interest FROM bank_accounts WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        conn.close()
-        if r:
-            return Decimal(str(r[0])), r[1]
-        return Decimal('0'), 0
-
-    def add_lottery_ticket(self, user_id: int, ticket_num: int, draw_id: int):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO lottery_tickets (user_id, ticket_number, draw_id, timestamp)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, ticket_num, draw_id, int(datetime.now().timestamp())))
-        conn.commit()
-        conn.close()
-
-    def get_lottery_tickets(self, user_id: int, draw_id: int) -> List[int]:
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT ticket_number FROM lottery_tickets WHERE user_id = ? AND draw_id = ?', (user_id, draw_id))
-        r = c.fetchall()
-        conn.close()
-        return [x[0] for x in r]
-
-    def get_level_exp(self, level: int) -> int:
-        if level < len(Config.LEVEL_EXP):
-            return Config.LEVEL_EXP[level]
-        return 100000 * level
-
-    def add_exp(self, user_id: int, exp: Decimal):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute('SELECT level, exp FROM users WHERE user_id = ?', (user_id,))
-        r = c.fetchone()
-        if r:
-            level, current_exp = r[0], Decimal(str(r[1]))
-            current_exp += exp
-            max_exp = self.get_level_exp(level)
-            while current_exp >= max_exp:
-                current_exp -= max_exp
-                level += 1
-                max_exp = self.get_level_exp(level)
-            c.execute('UPDATE users SET level = ?, exp = ? WHERE user_id = ?', (level, float(current_exp), user_id))
-        conn.commit()
-        conn.close()
-
+# ========== СОЗДАНИЕ БД ==========
 db = Database()
 
-# ==================== КЛАВИАТУРЫ ====================
-def main_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="📈 Торговля", callback_data="trade"),
-        InlineKeyboardButton(text="👤 Профиль", callback_data="profile")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🔒 Стейкинг", callback_data="stake"),
-        InlineKeyboardButton(text="🏆 Топ", callback_data="top")
-    )
-    builder.row(
-        InlineKeyboardButton(text="💀 Краш-арена", callback_data="crash"),
-        InlineKeyboardButton(text="🌾 Ферма", callback_data="farm")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🔄 P2P", callback_data="p2p"),
-        InlineKeyboardButton(text="🏅 Квесты", callback_data="quests")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🎁 Дейли", callback_data="daily"),
-        InlineKeyboardButton(text="👥 Рефералы", callback_data="referral")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🏪 Магазин", callback_data="shop"),
-        InlineKeyboardButton(text="🏦 Банк", callback_data="bank")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🎰 Лотерея", callback_data="lottery"),
-        InlineKeyboardButton(text="📰 Новости", callback_data="news")
-    )
-    builder.row(
-        InlineKeyboardButton(text="❓ Помощь", callback_data="help")
-    )
-    return builder.as_markup()
+# ========== СОСТОЯНИЯ FSM ==========
+class ShopStates(StatesGroup):
+    browsing = State()
+    buying = State()
 
-def assets_kb(back: str = "back_main") -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for asset, data in ASSETS.items():
-        price = db.get_price(asset)
-        change = get_change(asset)
-        arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
-        builder.row(
-            InlineKeyboardButton(
-                text=f"{data['emoji']} {asset} {data['color']} {price:.2f} {arrow}",
-                callback_data=f"asset_{asset}"
-            )
-        )
-    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=back))
-    return builder.as_markup()
+class BossStates(StatesGroup):
+    spawning = State()
+    managing = State()
 
-def trade_kb(asset: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    price = db.get_price(asset)
-    builder.row(
-        InlineKeyboardButton(text=f"📊 {price:.2f}", callback_data="refresh"),
-        InlineKeyboardButton(text=f"💀 Риск {get_crash_risk(asset)}%", callback_data="show_risk")
-    )
-    builder.row(
-        InlineKeyboardButton(text="💰 Купить", callback_data=f"buy_{asset}"),
-        InlineKeyboardButton(text="💸 Продать", callback_data=f"sell_{asset}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="x2", callback_data=f"lev_{asset}_2"),
-        InlineKeyboardButton(text="x5", callback_data=f"lev_{asset}_5"),
-        InlineKeyboardButton(text="x10", callback_data=f"lev_{asset}_10")
-    )
-    builder.row(
-        InlineKeyboardButton(text="📈 Лимит-ордер", callback_data=f"limit_buy_{asset}"),
-        InlineKeyboardButton(text="📉 Лимит-продажа", callback_data=f"limit_sell_{asset}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh_{asset}"),
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_assets")
-    )
-    return builder.as_markup()
-
-def profile_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="💰 Баланс", callback_data="p_balance"),
-        InlineKeyboardButton(text="📦 Портфель", callback_data="p_portfolio")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🏅 Достижения", callback_data="p_achievements"),
-        InlineKeyboardButton(text="📈 Статистика", callback_data="p_stats")
-    )
-    builder.row(
-        InlineKeyboardButton(text="💎 VIP", callback_data="p_vip"),
-        InlineKeyboardButton(text="📊 Капитал", callback_data="p_capital")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬆️ Уровень", callback_data="p_level"),
-        InlineKeyboardButton(text="💎 Кристаллы", callback_data="p_crystals")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
-    )
-    return builder.as_markup()
-
-def confirm_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"),
-        InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no")
-    )
-    return builder.as_markup()
-
-def cancel_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"))
-    return builder.as_markup()
-
-def shop_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for item_id, data in Config.SHOP_ITEMS.items():
-        builder.row(
-            InlineKeyboardButton(
-                text=f"{data['emoji']} {data['name']} — {data['price']:.0f} JET",
-                callback_data=f"shop_{item_id}"
-            )
-        )
-    builder.row(
-        InlineKeyboardButton(text="📦 Мой инвентарь", callback_data="shop_inventory")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
-    )
-    return builder.as_markup()
-
-def quest_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="📋 Квесты", callback_data="quest_list"),
-        InlineKeyboardButton(text="📊 Прогресс", callback_data="quest_progress")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
-    )
-    return builder.as_markup()
-
-def daily_tasks_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="✅ Задание 1", callback_data="daily_task_1"),
-        InlineKeyboardButton(text="✅ Задание 2", callback_data="daily_task_2"),
-        InlineKeyboardButton(text="✅ Задание 3", callback_data="daily_task_3")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🎁 Забрать награду", callback_data="daily_claim")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
-    )
-    return builder.as_markup()
-
-def bank_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="💰 Пополнить", callback_data="bank_deposit"),
-        InlineKeyboardButton(text="💸 Снять", callback_data="bank_withdraw")
-    )
-    builder.row(
-        InlineKeyboardButton(text="📊 Проценты", callback_data="bank_interest")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
-    )
-    return builder.as_markup()
-
-def lottery_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="🎫 Купить билет (1000 JET)", callback_data="lottery_buy")
-    )
-    builder.row(
-        InlineKeyboardButton(text="📊 Мои билеты", callback_data="lottery_my")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")
-    )
-    return builder.as_markup()
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
-def get_change(asset: str) -> float:
-    history = db.get_price_history(asset, 2)
-    if len(history) >= 2:
-        old, new = history[0], history[-1]
-        if old > 0:
-            return float((new - old) / old * 100)
-    return 0.0
-
-def get_crash_risk(asset: str) -> int:
-    base = ASSETS[asset]['crash_risk']
-    price = db.get_price(asset)
-    initial = ASSETS[asset]['initial']
-    ratio = float(price / initial)
-    bonus = 0
-    if ratio > 10: bonus = 20
-    elif ratio > 5: bonus = 12
-    elif ratio > 3: bonus = 6
-    return min(70, max(3, base + bonus + random.randint(-3, 3)))
-
-def check_crash(asset: str) -> Tuple[bool, Decimal]:
-    risk = get_crash_risk(asset)
-    if random.randint(1, 100) <= risk:
-        pct = Decimal(str(random.randint(Config.CRASH_MIN, Config.CRASH_MAX))) / Decimal('100')
-        return True, pct
-    return False, Decimal('0')
-
-def calc_price(asset: str) -> Tuple[Decimal, bool, Decimal]:
-    current = db.get_price(asset)
-    data = ASSETS[asset]
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def get_player_info(player: tuple) -> str:
+    """Форматирует информацию об игроке"""
+    equipment = db.get_equipped_items(player[0])
+    weapon = equipment.get("weapon", {}).get("name", "Нет")
+    armor = equipment.get("armor", {}).get("name", "Нет")
     
-    growth = Decimal(str(random.uniform(float(Config.GROWTH_MIN), float(Config.GROWTH_MAX))))
-    growth *= data['growth']
-    noise = Decimal(str(random.uniform(0.97, 1.03)))
-    new_price = current * growth * noise
+    # Бонусы от экипировки
+    atk_bonus = equipment.get("weapon", {}).get("attack", 0)
+    def_bonus = equipment.get("armor", {}).get("defense", 0)
     
-    is_crash, crash_pct = check_crash(asset)
-    if is_crash:
-        new_price = current * (Decimal('1') - crash_pct)
-        return new_price, True, crash_pct
-    
-    return new_price, False, Decimal('0')
-
-def fmt(n: Decimal) -> str:
-    if n >= Decimal('1000000'):
-        return f"{n/1000000:.2f}M"
-    if n >= Decimal('1000'):
-        return f"{n:,.2f}"
-    return f"{n:.4f}"
-
-def get_vip_info(level: int) -> Dict:
-    return Config.VIP_LEVELS.get(level, Config.VIP_LEVELS[0])
-
-# ==================== КОМАНДЫ ====================
-@dp.message(Command("start"))
-async def start_cmd(msg: types.Message, state: FSMContext):
-    uid = msg.from_user.id
-    uname = msg.from_user.username or "anon"
-    
-    user = db.get_user(uid)
-    if not user:
-        db.create_user(uid, uname)
-        logger.info(f"New user: {uid}")
-        
-        args = msg.text.split()
-        if len(args) > 1 and args[1].startswith('ref_'):
-            try:
-                ref_id = int(args[1].replace('ref_', ''))
-                if ref_id != uid:
-                    db.add_referral(ref_id, uid)
-                    db.update_balance(ref_id, Config.REFERRAL_BONUS)
-                    await bot.send_message(ref_id,
-                        f"🎉 Новый игрок @{uname} по твоей ссылке!\n+{Config.REFERRAL_BONUS:.0f} JET"
-                    )
-            except:
-                pass
-    
-    await msg.answer(
-        f"🚀 *КриптоКаток v3.1*\n\n"
-        f"👤 @{uname}\n"
-        f"💰 Баланс: {Config.START_BALANCE:.0f} JET\n"
-        f"⭐ Уровень: {Config.START_LEVEL}\n\n"
-        f"📈 *Цены растут каждую минуту!*\n"
-        f"💀 Краши, стейкинг, P2P, турниры, ферма,\n"
-        f"🏪 магазин, квесты, банк, лотерея и многое другое!\n\n"
-        f"⬇️ Выбирай действие:",
-        reply_markup=main_kb()
-    )
-    await state.clear()
-
-@dp.message(Command("menu"))
-async def menu_cmd(msg: types.Message, state: FSMContext):
-    await msg.answer("📋 Главное меню:", reply_markup=main_kb())
-    await state.clear()
-
-@dp.callback_query(F.data == "back_main")
-async def back_main(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.edit_text("📋 Главное меню:", reply_markup=main_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "back_assets")
-async def back_assets(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "📈 Выбери актив:",
-        reply_markup=assets_kb("back_main")
-    )
-    await cb.answer()
-
-# ==================== ТОРГОВЛЯ ====================
-@dp.callback_query(F.data == "trade")
-async def trade_cb(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "📈 *Выбери актив для торговли:*",
-        reply_markup=assets_kb("back_main")
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("asset_"))
-async def asset_cb(cb: CallbackQuery, state: FSMContext):
-    asset = cb.data.replace("asset_", "")
-    await state.update_data(asset=asset)
-    await cb.message.edit_text(
-        get_asset_text(asset),
-        reply_markup=trade_kb(asset)
-    )
-    await cb.answer()
-
-def get_asset_text(asset: str) -> str:
-    price = db.get_price(asset)
-    change = get_change(asset)
-    risk = get_crash_risk(asset)
-    history = db.get_price_history(asset, 10)
-    
-    graph = ""
-    if history:
-        mn, mx = min(history), max(history)
-        rg = mx - mn if mx > mn else Decimal('0.001')
-        for val in history[-8:]:
-            h = int((val - mn) / rg * 5) + 1
-            graph += "█" * h + f" {val:.2f}\n"
-    
-    arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
+    total_attack = player[6] + atk_bonus
+    total_defense = player[7] + def_bonus
     
     return (
-        f"{ASSETS[asset]['emoji']} *{asset}* {ASSETS[asset]['color']}\n\n"
-        f"💰 Цена: *{price:.2f}* JET\n"
-        f"📊 Изм.: *{arrow} {abs(change):.1f}%*\n"
-        f"💀 Риск: *{risk}%*\n"
-        f"📈 Волатильность: *{ASSETS[asset]['volatility']*100:.0f}%*\n\n"
-        f"*График:*\n{graph}\n"
-        f"Используй кнопки:"
+        f"👤 @{player[1] or 'Игрок'}\n"
+        f"🏆 Уровень: {player[2]}\n"
+        f"⚔️ Атака: {total_attack} (+{atk_bonus})\n"
+        f"🛡️ Защита: {total_defense} (+{def_bonus})\n"
+        f"❤️ HP: {player[9]}/{player[8]}\n"
+        f"💰 Монеты: {player[3]}\n"
+        f"💎 Кристаллы: {player[4]}\n"
+        f"📊 Опыт: {player[1]}/{player[10]}\n"
+        f"🗡️ Оружие: {weapon}\n"
+        f"🛡️ Броня: {armor}\n"
+        f"💀 Убито боссов: {player[12]}\n"
     )
 
-@dp.callback_query(F.data.startswith("lev_"))
-async def lev_cb(cb: CallbackQuery):
-    parts = cb.data.split("_")
-    asset, level = parts[1], int(parts[2])
-    conn = db.get_conn()
-    c = conn.cursor()
-    c.execute('UPDATE users SET leverage = ? WHERE user_id = ?', (level, cb.from_user.id))
-    conn.commit()
-    conn.close()
-    await cb.answer(f"⚡ Плечо x{level}!", show_alert=True)
-    await cb.message.edit_text(
-        get_asset_text(asset),
-        reply_markup=trade_kb(asset)
+def create_boss_status(boss: dict) -> str:
+    """Создает статусную строку босса"""
+    if not boss:
+        return "❌ Нет активных боссов!"
+    
+    hp_percent = (boss["current_hp"] / boss["max_hp"]) * 100
+    bar_length = 20
+    filled = int((hp_percent / 100) * bar_length)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    
+    # Определяем эмоцию для фазы
+    phase_emoji = {
+        1: "😴",
+        2: "😤",
+        3: "😡",
+        4: "💀"
+    }.get(boss["phase"], "😐")
+    
+    # Получаем участников
+    participants = db.get_boss_participants(boss["id"])
+    
+    text = (
+        f"{boss['display_name']}\n"
+        f"HP: {boss['current_hp']:,}/{boss['max_hp']:,}\n"
+        f"[{bar}] {hp_percent:.1f}%\n"
+        f"Фаза: {boss['phase']}/4 {phase_emoji}\n"
+        f"👥 Участников: {len(participants)}\n"
+        f"💰 Награда: {boss['reward_coins']} монет\n"
     )
+    
+    # Добавляем информацию о фазе
+    if boss.get("abilities"):
+        phase_key = f"phase_{boss['phase']}"
+        if phase_key in boss["abilities"]:
+            text += f"\n⚡ {boss['abilities'][phase_key]['ability']}"
+    
+    return text
 
-@dp.callback_query(F.data.startswith("buy_"))
-async def buy_cb(cb: CallbackQuery, state: FSMContext):
-    asset = cb.data.replace("buy_", "")
-    await state.update_data(action="buy", asset=asset)
-    user = db.get_user(cb.from_user.id)
-    await cb.message.edit_text(
-        f"💰 *Покупка {asset}*\n\n"
-        f"Цена: {db.get_price(asset):.2f} JET\n"
-        f"Баланс: {user['balance']:.2f} JET\n"
-        f"Плечо: x{user['leverage']}\n\n"
-        f"Введи количество:",
-        reply_markup=cancel_kb()
+def create_shop_keyboard(items: List[tuple]) -> InlineKeyboardMarkup:
+    """Создает клавиатуру магазина"""
+    keyboard = []
+    
+    # Группируем по категориям
+    categories = {}
+    for item in items:
+        cat = item[3]  # category
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(item)
+    
+    for cat, cat_items in categories.items():
+        keyboard.append([InlineKeyboardButton(
+            text=f"📁 {cat.upper()} ({len(cat_items)})",
+            callback_data=f"shop_cat_{cat}"
+        )])
+        
+        for item in cat_items[:3]:  # Показываем первые 3
+            emoji = item[9] or "📦"
+            keyboard.append([InlineKeyboardButton(
+                text=f"{emoji} {item[1]} - {item[7]}💰",
+                callback_data=f"shop_buy_{item[0]}"
+            )])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
+
+# Общая команда /start
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    user = message.from_user
+    db.register_player(user.id, user.username, user.first_name)
+    
+    # Добавляем чат в БД
+    if message.chat.type in ["group", "supergroup"]:
+        db.add_chat(message.chat.id, message.chat.title)
+    
+    welcome_text = (
+        "🎮 **Добро пожаловать в Boss Raid RPG!**\n\n"
+        "Здесь ты можешь сражаться с эпическими боссами вместе с друзьями!\n\n"
+        "📋 **Основные команды:**\n"
+        "/profile - твой профиль\n"
+        "/boss - статус текущего босса\n"
+        "/attack - атаковать босса\n"
+        "/heal - восстановить HP\n"
+        "/shop - магазин\n"
+        "/inventory - инвентарь\n"
+        "/top - топ игроков\n"
+        "/help - помощь\n\n"
+        "⚔️ Сражайся, прокачивайся и становись легендой!"
     )
-    await state.set_state(TradeFSM.amount)
-    await cb.answer()
+    
+    await message.answer(welcome_text, parse_mode="Markdown")
 
-@dp.callback_query(F.data.startswith("sell_"))
-async def sell_cb(cb: CallbackQuery, state: FSMContext):
-    asset = cb.data.replace("sell_", "")
-    portfolio = db.get_portfolio(cb.from_user.id)
-    if portfolio.get(asset, {}).get('amount', Decimal('0')) <= 0:
-        await cb.answer("❌ Нет актива!", show_alert=True)
+# Команда /help
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    help_text = (
+        "📖 **Справка по командам**\n\n"
+        "**Игровые команды:**\n"
+        "/profile - показать профиль\n"
+        "/boss - статус босса\n"
+        "/attack - атаковать босса\n"
+        "/heal - восстановить HP (кулдаун 5 мин)\n"
+        "/shop - открыть магазин\n"
+        "/inventory - инвентарь\n"
+        "/equip [id] - экипировать предмет\n"
+        "/top - топ игроков\n"
+        "/stats - статистика чата\n\n"
+        "**Для групп:**\n"
+        "/join - присоединиться к битве с боссом\n"
+        "/leave - покинуть битву\n\n"
+        "**Данжи (в разработке):**\n"
+        "/dungeon - войти в данж\n\n"
+        "**Админ-команды:**\n"
+        "/admin - админ-панель"
+    )
+    await message.answer(help_text, parse_mode="Markdown")
+
+# Команда /id - узнать свой ID
+@dp.message(Command("id"))
+async def cmd_id(message: types.Message):
+    await message.answer(f"🆔 Твой ID: `{message.from_user.id}`", parse_mode="Markdown")
+
+# ========== ОСНОВНЫЕ ИГРОВЫЕ КОМАНДЫ ==========
+
+# Команда /profile
+@dp.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    user_id = message.from_user.id
+    player = db.get_player(user_id)
+    
+    if not player:
+        await message.answer("❌ Ты не зарегистрирован! Напиши /start")
         return
-    await state.update_data(action="sell", asset=asset)
-    await cb.message.edit_text(
-        f"💸 *Продажа {asset}*\n\n"
-        f"У тебя: {portfolio[asset]['amount']:.4f}\n"
-        f"Цена: {db.get_price(asset):.2f} JET\n\n"
-        f"Введи количество:",
-        reply_markup=cancel_kb()
+    
+    await message.answer(
+        get_player_info(player),
+        parse_mode="Markdown"
     )
-    await state.set_state(TradeFSM.amount)
-    await cb.answer()
 
-@dp.message(TradeFSM.amount)
-async def trade_amount(msg: types.Message, state: FSMContext):
-    try:
-        amount = Decimal(msg.text)
-        if amount <= 0:
-            await msg.answer("❌ > 0!", reply_markup=cancel_kb())
-            return
-        
-        data = await state.get_data()
-        action, asset = data['action'], data['asset']
-        uid = msg.from_user.id
-        user = db.get_user(uid)
-        price = db.get_price(asset)
-        lev = user['leverage']
-        
-        if action == "buy":
-            total = amount * price * (1 + Config.COMMISSION) / Decimal(lev)
-            if total > user['balance']:
-                await msg.answer(f"❌ Нужно {total:.2f}, есть {user['balance']:.2f}", reply_markup=cancel_kb())
-                return
-            await state.update_data(amount=amount, total=total)
-            await msg.answer(
-                f"📊 *Подтверждение покупки*\n\n"
-                f"{asset}: {amount:.4f}\n"
-                f"Цена: {price:.2f}\n"
-                f"Плечо: x{lev}\n"
-                f"Итого: {total:.2f}\n\n"
-                f"Подтверждаешь?",
-                reply_markup=confirm_kb()
+# Команда /boss
+@dp.message(Command("boss"))
+async def cmd_boss(message: types.Message):
+    boss = db.get_active_boss()
+    
+    if not boss:
+        await message.answer("❌ Нет активных боссов! Ожидайте появления.")
+        return
+    
+    # Получаем участников
+    participants = db.get_boss_participants(boss["id"])
+    
+    # Проверяем, участвует ли игрок
+    user_id = message.from_user.id
+    is_participant = any(p[0] == user_id for p in participants)
+    
+    # Создаем клавиатуру
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⚔️ Атаковать!" if is_participant else "👋 Присоединиться",
+            callback_data="boss_attack" if is_participant else "boss_join"
+        )],
+        [InlineKeyboardButton(text="📊 Топ дамагеров", callback_data="boss_top")]
+    ])
+    
+    await message.answer(
+        create_boss_status(boss),
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+# Команда /attack
+@dp.message(Command("attack"))
+async def cmd_attack(message: types.Message):
+    user_id = message.from_user.id
+    player = db.get_player(user_id)
+    
+    if not player:
+        await message.answer("❌ Зарегистрируйся через /start")
+        return
+    
+    # Проверяем активного босса
+    boss = db.get_active_boss()
+    if not boss:
+        await message.answer("❌ Нет активных боссов!")
+        return
+    
+    # Проверяем участие
+    db.cursor.execute(
+        "SELECT * FROM boss_participants WHERE boss_id = ? AND user_id = ?",
+        (boss["id"], user_id)
+    )
+    if not db.cursor.fetchone():
+        await message.answer("❌ Ты не участвуешь в битве! Напиши /join")
+        return
+    
+    # Проверяем кулдаун (30 секунд)
+    if player[13]:
+        last_attack = datetime.fromisoformat(player[13])
+        cooldown = 30  # секунд
+        if (datetime.now() - last_attack).seconds < cooldown:
+            remaining = cooldown - (datetime.now() - last_attack).seconds
+            await message.answer(
+                f"⏳ Подожди {remaining} секунд перед следующей атакой!"
             )
-        else:
-            portfolio = db.get_portfolio(uid)
-            if amount > portfolio.get(asset, {}).get('amount', Decimal('0')):
-                await msg.answer(f"❌ У тебя только {portfolio[asset]['amount']:.4f}", reply_markup=cancel_kb())
-                return
-            total = amount * price * (1 - Config.COMMISSION)
-            await state.update_data(amount=amount, total=total)
-            await msg.answer(
-                f"📊 *Подтверждение продажи*\n\n"
-                f"{asset}: {amount:.4f}\n"
-                f"Цена: {price:.2f}\n"
-                f"Итого: {total:.2f}\n\n"
-                f"Подтверждаешь?",
-                reply_markup=confirm_kb()
+            return
+    
+    # Проверяем HP
+    if player[9] <= 0:
+        await message.answer("💀 Ты мертв! Используй /heal чтобы воскреснуть (кулдаун 10 мин)")
+        return
+    
+    # Расчет урона
+    equipment = db.get_equipped_items(user_id)
+    weapon_bonus = equipment.get("weapon", {}).get("attack", 0)
+    total_attack = player[6] + weapon_bonus
+    
+    # Случайный разброс урона
+    damage = random.randint(int(total_attack * 0.7), int(total_attack * 1.3))
+    
+    # Шанс критического удара (10%)
+    is_critical = random.random() < 0.1
+    if is_critical:
+        damage = int(damage * 2)
+        crit_text = "💥 **КРИТИЧЕСКИЙ УДАР!**"
+    else:
+        crit_text = ""
+    
+    # Наносим урон
+    killed, new_hp = db.deal_damage_to_boss(boss["id"], user_id, damage)
+    
+    # Обновляем время атаки
+    db.update_player_stats(user_id, "last_attack_time", datetime.now().isoformat())
+    
+    # Ответное действие босса (наносит урон игроку)
+    boss_damage = random.randint(5, 15)
+    if random.random() < 0.3:  # 30% шанс что босс атакует
+        new_hp = max(0, player[9] - boss_damage)
+        db.update_player_stats(user_id, "current_hp", new_hp)
+        
+        # Проверяем смерть игрока
+        if new_hp == 0:
+            db.cursor.execute("SELECT username FROM players WHERE user_id = ?", (user_id,))
+            username = db.cursor.fetchone()[0] or "Игрок"
+            
+            # Отправляем сообщение в чат
+            await message.reply(
+                f"💀 {username} пал в бою! Босс нанес {boss_damage} урона.\n"
+                f"Используй /heal чтобы вернуться в строй!"
             )
-        await state.set_state(TradeFSM.confirm)
         
-    except:
-        await msg.answer("❌ Введи число!", reply_markup=cancel_kb())
-
-@dp.callback_query(F.data == "confirm_yes")
-async def confirm_yes(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    action, asset, amount, total = data['action'], data['asset'], data['amount'], data['total']
-    uid = cb.from_user.id
+        boss_attack_text = f"\n💢 Босс атакует тебя! -{boss_damage} HP"
+    else:
+        boss_attack_text = ""
     
-    if action == "buy":
-        price = db.get_price(asset)
-        db.update_balance(uid, -total)
-        db.update_portfolio(uid, asset, amount)
-        db.add_transaction(uid, 'buy', asset, amount, price)
-        await cb.message.edit_text(
-            f"✅ *Куплено!*\n\n{asset}: +{amount:.4f}\nЦена: {price:.2f}\nСписано: {total:.2f}",
-            reply_markup=trade_kb(asset)
+    # Формируем ответ
+    response = (
+        f"⚔️ **Ты атакуешь босса!**\n"
+        f"{crit_text}\n"
+        f"Нанесено урона: **{damage}**\n"
+        f"Осталось HP босса: **{new_hp:,}**\n"
+        f"{boss_attack_text}"
+    )
+    
+    await message.answer(response, parse_mode="Markdown")
+    
+    # Если босс убит - отправляем сообщение в чат
+    if killed:
+        result = db.boss_killed(boss["id"])
+        
+        # Формируем сообщение о победе
+        top_player = result["participants"][0] if result["participants"] else None
+        top_text = ""
+        if top_player:
+            db.cursor.execute("SELECT username FROM players WHERE user_id = ?", (top_player[0],))
+            username = db.cursor.fetchone()[0] or "Игрок"
+            top_text = f"🏆 Топ дамагер: @{username} - {top_player[1]:,} урона!"
+        
+        await message.answer(
+            f"🎉 **БОСС ПОВЕРЖЕН!** 🎉\n\n"
+            f"{boss['display_name']} уничтожен!\n"
+            f"Всего участников: {len(result['participants'])}\n"
+            f"Общий урон: {result['total_damage']:,}\n"
+            f"{top_text}\n\n"
+            f"💰 Все участники получили награды!"
         )
-        # Квесты
-        db.update_quest_progress(uid, 1, 1)  # Первая сделка
-        db.update_quest_progress(uid, 2, 1)  # Торговец
-        db.update_quest_progress(uid, 3, 1)  # Профи
-    else:
-        price = db.get_price(asset)
-        portfolio = db.get_portfolio(uid)
-        avg = portfolio[asset]['avg_price']
-        profit = amount * (price - avg)
-        db.update_balance(uid, total)
-        db.update_portfolio(uid, asset, -amount)
-        db.add_transaction(uid, 'sell', asset, amount, price, profit)
-        
-        # VIP бонус
-        vip = db.get_vip_level(uid)
-        vip_bonus = get_vip_info(vip)['bonus']
-        if vip_bonus > 0 and profit > 0:
-            bonus_amt = profit * Decimal(vip_bonus) / Decimal('100')
-            db.update_balance(uid, bonus_amt)
-            profit += bonus_amt
-        
-        await cb.message.edit_text(
-            f"✅ *Продано!*\n\n{asset}: -{amount:.4f}\nЦена: {price:.2f}\n"
-            f"Получено: {total:.2f}\nПрибыль: {'+' if profit > 0 else ''}{profit:.2f}",
-            reply_markup=trade_kb(asset)
-        )
-        
-        # Опыт
-        exp_gain = abs(profit) / Decimal('100')
-        db.add_exp(uid, exp_gain)
-        
-        # Ежедневные задания
-        db.update_daily_task(uid, 1)
-        
-        # Квесты
-        db.update_quest_progress(uid, 2, 1)
-        db.update_quest_progress(uid, 3, 1)
-        
-        # Турниры
-        await update_tournaments(uid, profit)
+
+# Команда /heal - восстановление HP
+@dp.message(Command("heal"))
+async def cmd_heal(message: types.Message):
+    user_id = message.from_user.id
+    player = db.get_player(user_id)
     
-    await check_achievements(uid, cb.message)
-    await state.clear()
-    await cb.answer()
-
-@dp.callback_query(F.data == "confirm_no")
-async def confirm_no(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.edit_text("❌ Отменено", reply_markup=main_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "cancel")
-async def cancel_cb(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.edit_text("❌ Отменено", reply_markup=main_kb())
-    await cb.answer()
-
-# ==================== ПРОФИЛЬ ====================
-@dp.callback_query(F.data == "profile")
-async def profile_cb(cb: CallbackQuery):
-    await show_profile(cb.from_user.id, cb.message)
-    await cb.answer()
-
-async def show_profile(uid: int, msg: types.Message):
-    user = db.get_user(uid)
-    capital = db.get_total_capital(uid)
-    rank = db.get_rank(uid)
-    vip = get_vip_info(user['vip_level'])
-    rating = db.get_rating(uid)
-    
-    level_exp = db.get_level_exp(user['level'])
-    exp_progress = int(float(user['exp']) / level_exp * 100) if level_exp > 0 else 0
-    
-    text = (
-        f"👤 *Профиль* @{user['username'] or 'anon'}\n\n"
-        f"⭐ Уровень: {user['level']} ({exp_progress}%)\n"
-        f"💰 Баланс: {fmt(user['balance'])} JET\n"
-        f"💎 Капитал: {fmt(capital)} JET\n"
-        f"💎 Кристаллы: {user['crystals']}\n"
-        f"🏆 Рейтинг: #{rank} (ELO: {rating})\n"
-        f"{vip['color']} VIP: {vip['name']} (+{vip['bonus']}%)\n"
-        f"👥 Рефералов: {user['referral_count']}\n"
-        f"🔒 Стейк: {user['stake_amount']:.2f} JET\n"
-        f"🌾 Ферма: Lv.{user['farm_level']}\n"
-        f"📊 Сделок: {user['total_trades']} (вин {user['win_trades']})"
-    )
-    await msg.edit_text(text, reply_markup=profile_kb())
-
-@dp.callback_query(F.data == "p_balance")
-async def p_balance(cb: CallbackQuery):
-    user = db.get_user(cb.from_user.id)
-    await cb.message.edit_text(
-        f"💰 *Баланс:* {fmt(user['balance'])} JET\n"
-        f"💸 Доступно: {fmt(user['withdrawable'])} JET\n"
-        f"💎 Кристаллы: {user['crystals']}",
-        reply_markup=profile_kb()
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data == "p_portfolio")
-async def p_portfolio(cb: CallbackQuery):
-    uid = cb.from_user.id
-    portfolio = db.get_portfolio(uid)
-    text = "📦 *Портфель:*\n\n"
-    total = Decimal('0')
-    for asset, data in portfolio.items():
-        if data['amount'] > 0:
-            price = db.get_price(asset)
-            value = data['amount'] * price
-            total += value
-            profit = (price - data['avg_price']) / data['avg_price'] * 100 if data['avg_price'] > 0 else 0
-            emoji = "🟢" if profit > 0 else "🔴" if profit < 0 else "⚪"
-            text += f"{ASSETS[asset]['emoji']} *{asset}:* {data['amount']:.4f} ({value:.2f} JET) {emoji} {profit:.1f}%\n"
-    if total == 0:
-        text = "📦 *Портфель пуст*"
-    else:
-        text += f"\n💰 *Итого:* {fmt(total)} JET"
-    await cb.message.edit_text(text, reply_markup=profile_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "p_achievements")
-async def p_achievements(cb: CallbackQuery):
-    uid = cb.from_user.id
-    has = db.get_achievements(uid)
-    all_ach = {
-        1: "🏅 Первая сделка",
-        2: "💀 Хомяк (10 проигрышей)",
-        3: "🐋 Кит (1000+ актива)",
-        4: "👑 Миллиардер (1B JET)",
-        5: "📊 Инвестор (все активы)",
-        6: "🔒 Стейкер (10k+ стейк)",
-        7: "🏆 Лидер (топ-3)",
-        8: "🔥 Трейдер (100 сделок)",
-        9: "⚡ Спринтер (10 сделок за час)",
-        10: "💎 Алмазный VIP",
-        11: "🌾 Фермер (Lv.10)",
-        12: "👑 Король краша (50 побед)"
-    }
-    text = "🏅 *Достижения:*\n\n"
-    if has:
-        for aid in has:
-            if aid in all_ach:
-                text += f"✅ {all_ach[aid]}\n"
-    else:
-        text += "❌ Пока нет\n"
-    text += "\n*Остальные:*\n"
-    for aid, name in all_ach.items():
-        if aid not in has:
-            text += f"⬜ {name}\n"
-    await cb.message.edit_text(text, reply_markup=profile_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "p_stats")
-async def p_stats(cb: CallbackQuery):
-    uid = cb.from_user.id
-    user = db.get_user(uid)
-    stats = db.get_trade_stats(uid)
-    wr = (stats['win'] / stats['total'] * 100) if stats['total'] > 0 else 0
-    rating = db.get_rating(uid)
-    text = (
-        f"📈 *Статистика*\n\n"
-        f"📊 Сделок: {stats['total']}\n"
-        f"🏆 Побед: {stats['win']} ({wr:.1f}%)\n"
-        f"💰 Заработано: {fmt(user['total_earned'])} JET\n"
-        f"👥 Рефералов: {user['referral_count']}\n"
-        f"⭐ Уровень: {user['level']}\n"
-        f"🎯 Рейтинг: {rating}"
-    )
-    await cb.message.edit_text(text, reply_markup=profile_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "p_vip")
-async def p_vip(cb: CallbackQuery):
-    uid = cb.from_user.id
-    user = db.get_user(uid)
-    level = user['vip_level']
-    vip = get_vip_info(level)
-    next_vip = get_vip_info(level + 1) if level < 5 else None
-    
-    text = f"💎 *VIP-статус*\n\n"
-    text += f"Твой уровень: {vip['color']} {vip['name']}\n"
-    text += f"Бонус к прибыли: +{vip['bonus']}%\n"
-    text += f"Депозит: {fmt(user['total_deposit'])} JET\n\n"
-    
-    if next_vip:
-        need = next_vip['min_deposit'] - user['total_deposit']
-        text += f"До {next_vip['name']}: {fmt(need)} JET"
-    else:
-        text += "👑 Максимальный уровень!"
-    
-    await cb.message.edit_text(text, reply_markup=profile_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "p_capital")
-async def p_capital(cb: CallbackQuery):
-    uid = cb.from_user.id
-    capital = db.get_total_capital(uid)
-    rank = db.get_rank(uid)
-    await cb.message.edit_text(
-        f"💎 *Капитал:* {fmt(capital)} JET\n"
-        f"🏆 Рейтинг: #{rank}\n"
-        f"📊 Топ-1: {fmt(db.get_top(1)[0][2]) if db.get_top(1) else '—'}",
-        reply_markup=profile_kb()
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data == "p_level")
-async def p_level(cb: CallbackQuery):
-    uid = cb.from_user.id
-    user = db.get_user(uid)
-    level_exp = db.get_level_exp(user['level'])
-    next_exp = db.get_level_exp(user['level'] + 1)
-    text = (
-        f"⭐ *Уровень {user['level']}*\n\n"
-        f"Опыт: {user['exp']:.0f}/{level_exp}\n"
-        f"До следующего: {level_exp - user['exp']:.0f} EXP\n"
-        f"Следующий уровень: {user['level'] + 1}\n\n"
-        f"*Как получить опыт:*\n"
-        f"• Продажа активов (+прибыль/100)\n"
-        f"• Ежедневные задания\n"
-        f"• Квесты"
-    )
-    await cb.message.edit_text(text, reply_markup=profile_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "p_crystals")
-async def p_crystals(cb: CallbackQuery):
-    uid = cb.from_user.id
-    user = db.get_user(uid)
-    text = (
-        f"💎 *Кристаллы:* {user['crystals']}\n\n"
-        f"*Как получить:*\n"
-        f"• За выполнение квестов\n"
-        f"• Ежедневные задания\n"
-        f"• Достижения\n"
-        f"• Турниры\n\n"
-        f"*Что можно купить:*\n"
-        f"• VIP-пропуски\n"
-        f"• Бустеры\n"
-        f"• Счастливые монеты"
-    )
-    await cb.message.edit_text(text, reply_markup=profile_kb())
-    await cb.answer()
-
-# ==================== СТЕЙКИНГ ====================
-@dp.callback_query(F.data == "stake")
-async def stake_cb(cb: CallbackQuery):
-    await show_stake(cb.from_user.id, cb.message)
-    await cb.answer()
-
-async def show_stake(uid: int, msg: types.Message):
-    user = db.get_user(uid)
-    text = (
-        f"🔒 *Стейкинг*\n\n"
-        f"💰 Баланс: {user['balance']:.2f} JET\n"
-        f"🔒 Застейкано: {user['stake_amount']:.2f} JET\n"
-        f"📊 Доходность: {Config.STAKE_PERCENT}% за {Config.STAKE_HOURS}ч\n"
-        f"📉 Мин: {Config.MIN_STAKE:.0f} JET"
-    )
-    await msg.edit_text(text, reply_markup=stake_kb())
-
-@dp.callback_query(F.data == "stake_do")
-async def stake_do(cb: CallbackQuery, state: FSMContext):
-    user = db.get_user(cb.from_user.id)
-    if user['stake_amount'] > 0:
-        await cb.answer("⚠️ Уже есть стейк!", show_alert=True)
+    if not player:
+        await message.answer("❌ Зарегистрируйся через /start")
         return
-    await cb.message.edit_text(
-        f"Введи сумму стейка (мин {Config.MIN_STAKE:.0f}):",
-        reply_markup=cancel_kb()
-    )
-    await state.set_state(StakeFSM.amount)
-    await cb.answer()
-
-@dp.message(StakeFSM.amount)
-async def stake_amount(msg: types.Message, state: FSMContext):
-    try:
-        amount = Decimal(msg.text)
-        if amount < Config.MIN_STAKE:
-            await msg.answer(f"❌ Мин {Config.MIN_STAKE:.0f}!", reply_markup=cancel_kb())
+    
+    # Проверяем кулдаун (5 минут)
+    if player[14]:
+        last_heal = datetime.fromisoformat(player[14])
+        cooldown = 300  # 5 минут
+        if (datetime.now() - last_heal).seconds < cooldown:
+            remaining = cooldown - (datetime.now() - last_heal).seconds
+            minutes = remaining // 60
+            seconds = remaining % 60
+            await message.answer(
+                f"⏳ Восстановление доступно через {minutes}м {seconds}с"
+            )
             return
-        uid = msg.from_user.id
-        user = db.get_user(uid)
-        if amount > user['balance']:
-            await msg.answer(f"❌ Недостаточно!", reply_markup=cancel_kb())
-            return
-        db.update_balance(uid, -amount)
-        db.update_stake(uid, amount, int(datetime.now().timestamp()))
-        await state.clear()
-        await msg.answer(
-            f"🔒 *Стейк создан!*\n\n{amount:.2f} JET на {Config.STAKE_HOURS}ч\nБонус: {amount * Config.STAKE_PERCENT / 100:.2f} JET",
-            reply_markup=stake_kb()
-        )
-    except:
-        await msg.answer("❌ Введи число!", reply_markup=cancel_kb())
-
-@dp.callback_query(F.data == "unstake")
-async def unstake_cb(cb: CallbackQuery):
-    uid = cb.from_user.id
-    user = db.get_user(uid)
-    if user['stake_amount'] <= 0:
-        await cb.answer("❌ Нет стейка!", show_alert=True)
-        return
-    elapsed = int(datetime.now().timestamp()) - user['stake_time']
-    if elapsed < Config.STAKE_HOURS * 3600:
-        rem = Config.STAKE_HOURS * 3600 - elapsed
-        h, m = rem // 3600, (rem % 3600) // 60
-        await cb.answer(f"⏳ Осталось {h}ч {m}мин", show_alert=True)
-        return
-    bonus = user['stake_amount'] * (Config.STAKE_PERCENT / 100)
-    total = user['stake_amount'] + bonus
-    db.update_balance(uid, total)
-    db.update_stake(uid, Decimal('0'), 0)
-    await cb.message.edit_text(
-        f"🔓 *Стейк разблокирован!*\n\n+{total:.2f} JET\nБонус: {bonus:.2f}",
-        reply_markup=stake_kb()
+    
+    # Восстанавливаем HP
+    heal_amount = random.randint(20, 50)
+    new_hp = min(player[8], player[9] + heal_amount)
+    db.update_player_stats(user_id, "current_hp", new_hp)
+    db.update_player_stats(user_id, "last_heal_time", datetime.now().isoformat())
+    
+    await message.answer(
+        f"❤️ Ты восстановил {heal_amount} HP!\n"
+        f"Текущее HP: {new_hp}/{player[8]}"
     )
-    await cb.answer()
 
-@dp.callback_query(F.data == "my_stake")
-async def my_stake(cb: CallbackQuery):
-    uid = cb.from_user.id
-    user = db.get_user(uid)
-    if user['stake_amount'] <= 0:
-        text = "🔒 Нет стейка"
-    else:
-        elapsed = int(datetime.now().timestamp()) - user['stake_time']
-        total_time = Config.STAKE_HOURS * 3600
-        progress = min(100, int(elapsed / total_time * 100))
-        if elapsed >= total_time:
-            status = "✅ Готов"
-        else:
-            rem = total_time - elapsed
-            h, m = rem // 3600, (rem % 3600) // 60
-            status = f"⏳ {h}ч {m}мин"
-        text = f"🔒 *Стейк*\n\nСумма: {user['stake_amount']:.2f}\nПрогресс: {progress}%\nСтатус: {status}"
-    await cb.message.edit_text(text, reply_markup=stake_kb())
-    await cb.answer()
+# Команда /join - присоединиться к битве
+@dp.message(Command("join"))
+async def cmd_join(message: types.Message):
+    user_id = message.from_user.id
+    player = db.get_player(user_id)
+    
+    if not player:
+        await message.answer("❌ Зарегистрируйся через /start")
+        return
+    
+    boss = db.get_active_boss()
+    if not boss:
+        await message.answer("❌ Нет активных боссов!")
+        return
+    
+    # Проверяем, не участвует ли уже
+    db.cursor.execute(
+        "SELECT * FROM boss_participants WHERE boss_id = ? AND user_id = ?",
+        (boss["id"], user_id)
+    )
+    if db.cursor.fetchone():
+        await message.answer("👋 Ты уже участвуешь в битве!")
+        return
+    
+    # Проверяем минимальное количество участников
+    participants = db.get_boss_participants(boss["id"])
+    if len(participants) >= 10:  # Максимум 10 участников
+        await message.answer("❌ Слишком много участников! Максимум 10.")
+        return
+    
+    # Добавляем участника
+    db.add_boss_participant(boss["id"], user_id)
+    
+    await message.answer(
+        f"👋 @{message.from_user.username or 'Игрок'} присоединился к битве!\n"
+        f"Всего участников: {len(participants) + 1}"
+    )
 
-# ==================== ТОП ====================
-@dp.callback_query(F.data == "top")
-async def top_cb(cb: CallbackQuery):
-    await cb.message.edit_text("🏆 *Топы*", reply_markup=top_kb())
-    await cb.answer()
+# Команда /leave - покинуть битву
+@dp.message(Command("leave"))
+async def cmd_leave(message: types.Message):
+    user_id = message.from_user.id
+    boss = db.get_active_boss()
+    
+    if not boss:
+        await message.answer("❌ Нет активных боссов!")
+        return
+    
+    db.cursor.execute(
+        "DELETE FROM boss_participants WHERE boss_id = ? AND user_id = ?",
+        (boss["id"], user_id)
+    )
+    db.conn.commit()
+    
+    await message.answer("👋 Ты покинул битву!")
 
-@dp.callback_query(F.data == "top_capital")
-async def top_capital(cb: CallbackQuery):
-    top = db.get_top(10)
-    text = "🏆 *Топ по капиталу:*\n\n"
-    for i, (uid, uname, bal, _) in enumerate(top, 1):
-        m = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-        text += f"{m} @{uname or 'anon'} — {fmt(bal)} JET\n"
-    await cb.message.edit_text(text, reply_markup=top_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "top_profit")
-async def top_profit(cb: CallbackQuery):
-    top = db.get_weekly_top(10)
-    text = "📈 *Топ по прибыли (неделя):*\n\n"
-    for i, (uid, uname, profit) in enumerate(top, 1):
-        m = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-        text += f"{m} @{uname or 'anon'} — +{fmt(profit)} JET\n"
-    await cb.message.edit_text(text, reply_markup=top_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "top_trades")
-async def top_trades(cb: CallbackQuery):
-    conn = db.get_conn()
-    c = conn.cursor()
-    c.execute('SELECT user_id, username, total_trades, win_trades FROM users ORDER BY total_trades DESC LIMIT 10')
-    r = c.fetchall()
-    conn.close()
-    text = "🎯 *Топ по сделкам:*\n\n"
-    for i, (uid, uname, total, win) in enumerate(r, 1):
-        m = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-        wr = (win / total * 100) if total > 0 else 0
-        text += f"{m} @{uname or 'anon'} — {total} ({wr:.0f}%)\n"
-    await cb.message.edit_text(text, reply_markup=top_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "top_crashes")
-async def top_crashes(cb: CallbackQuery):
-    conn = db.get_conn()
-    c = conn.cursor()
-    c.execute('''
-        SELECT u.user_id, u.username, COUNT(*) as wins
-        FROM crash_bets cb JOIN users u ON cb.user_id = u.user_id
-        WHERE cb.status = 'win'
-        GROUP BY cb.user_id ORDER BY wins DESC LIMIT 10
+# Команда /top
+@dp.message(Command("top"))
+async def cmd_top(message: types.Message):
+    db.cursor.execute('''
+        SELECT user_id, username, level, total_damage, boss_kills, coins
+        FROM players
+        ORDER BY level DESC, total_damage DESC
+        LIMIT 10
     ''')
-    r = c.fetchall()
-    conn.close()
-    text = "💀 *Топ по крашам:*\n\n"
-    for i, (uid, uname, wins) in enumerate(r, 1):
-        m = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-        text += f"{m} @{uname or 'anon'} — {wins} побед\n"
-    await cb.message.edit_text(text, reply_markup=top_kb())
-    await cb.answer()
+    top_players = db.cursor.fetchall()
+    
+    if not top_players:
+        await message.answer("📊 Нет данных")
+        return
+    
+    text = "🏆 **ТОП ИГРОКОВ**\n\n"
+    medals = ["🥇", "🥈", "🥉"]
+    
+    for i, player in enumerate(top_players):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        username = f"@{player[1]}" if player[1] else f"Игрок {player[0]}"
+        text += (
+            f"{medal} {username}\n"
+            f"   Уровень: {player[2]} | Урон: {player[3]:,} | Боссов: {player[4]} | Монет: {player[5]}\n\n"
+        )
+    
+    await message.answer(text, parse_mode="Markdown")
 
-# ==================== КРАШ-АРЕНА ====================
-@dp.callback_query(F.data == "crash")
-async def crash_cb(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "💀 *Краш-арена*\n\n"
-        "Ставь на рост или падение!\n"
-        "📈 Рост x1.5\n📉 Падение x2.5\n🎰 Лотерея x4\n\n"
-        "Выбери актив:",
-        reply_markup=assets_kb("back_main")
+# ========== МАГАЗИН ==========
+
+# Команда /shop
+@dp.message(Command("shop"))
+async def cmd_shop(message: types.Message):
+    items = db.get_shop_items()
+    
+    if not items:
+        await message.answer("🛒 Магазин пуст!")
+        return
+    
+    keyboard = create_shop_keyboard(items)
+    
+    await message.answer(
+        "🛒 **Магазин**\n\n"
+        "Выбери категорию или предмет для покупки:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
     )
-    await cb.answer()
 
-@dp.callback_query(F.data.startswith("cr_up_"))
-async def cr_up(cb: CallbackQuery, state: FSMContext):
-    asset = cb.data.replace("cr_up_", "")
-    await state.update_data(cr_asset=asset, cr_type="up")
-    await ask_crash(cb, state)
+# Команда /inventory
+@dp.message(Command("inventory"))
+async def cmd_inventory(message: types.Message):
+    user_id = message.from_user.id
+    inventory = db.get_inventory(user_id)
+    
+    if not inventory:
+        await message.answer("📦 У тебя пустой инвентарь!")
+        return
+    
+    text = "📦 **Твой инвентарь**\n\n"
+    for item in inventory:
+        name = item[6]  # shop_items.name
+        emoji = item[10] or "📦"
+        category = item[7]
+        quantity = item[3]
+        equipped = "✅" if item[4] else "❌"
+        
+        # Показываем бонусы
+        bonuses = []
+        if item[8] > 0:  # attack_bonus
+            bonuses.append(f"⚔️+{item[8]}")
+        if item[9] > 0:  # defense_bonus
+            bonuses.append(f"🛡️+{item[9]}")
+        bonus_text = " | ".join(bonuses) if bonuses else "Нет бонусов"
+        
+        text += f"{emoji} **{name}** (x{quantity}) {equipped}\n"
+        text += f"   {category} | {bonus_text}\n\n"
+    
+    await message.answer(text, parse_mode="Markdown")
 
-@dp.callback_query(F.data.startswith("cr_down_"))
-async def cr_down(cb: CallbackQuery, state: FSMContext):
-    asset = cb.data.replace("cr_down_", "")
-    await state.update_data(cr_asset=asset, cr_type="down")
-    await ask_crash(cb, state)
-
-@dp.callback_query(F.data.startswith("cr_auto_"))
-async def cr_auto(cb: CallbackQuery, state: FSMContext):
-    asset = cb.data.replace("cr_auto_", "")
-    await state.update_data(cr_asset=asset, cr_type="auto")
-    await ask_crash(cb, state)
-
-async def ask_crash(cb: CallbackQuery, state: FSMContext):
-    user = db.get_user(cb.from_user.id)
-    await cb.message.edit_text(
-        f"💀 *Ставка*\n\nБаланс: {user['balance']:.2f}\n\nВведи сумму:",
-        reply_markup=cancel_kb()
-    )
-    await state.set_state(CrashFSM.amount)
-    await cb.answer()
-
-@dp.message(CrashFSM.amount)
-async def crash_amount(msg: types.Message, state: FSMContext):
+# Команда /equip
+@dp.message(Command("equip"))
+async def cmd_equip(message: types.Message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "⚠️ Укажи ID предмета\n"
+            "Пример: `/equip 1`",
+            parse_mode="Markdown"
+        )
+        return
+    
     try:
-        amount = Decimal(msg.text)
-        if amount <= 0:
-            await msg.answer("❌ > 0!", reply_markup=cancel_kb())
+        item_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ Некорректный ID!")
+        return
+    
+    user_id = message.from_user.id
+    success, msg = db.equip_item(user_id, item_id)
+    
+    await message.answer(msg)
+
+# Обработка callback-запросов магазина
+@dp.callback_query(lambda c: c.data.startswith("shop_"))
+async def process_shop_callback(callback: types.CallbackQuery):
+    data = callback.data.split("_")
+    action = data[1]
+    
+    if action == "cat":
+        category = data[2]
+        items = db.get_shop_items(category)
+        
+        if not items:
+            await callback.answer("В этой категории нет товаров", show_alert=True)
             return
-        uid = msg.from_user.id
-        user = db.get_user(uid)
-        if amount > user['balance']:
-            await msg.answer(f"❌ Недостаточно!", reply_markup=cancel_kb())
-            return
         
-        data = await state.get_data()
-        asset = data['cr_asset']
-        bet_type = data['cr_type']
-        coef = {"up": Decimal('1.5'), "down": Decimal('2.5'), "auto": Decimal('4')}[bet_type]
+        text = f"📁 **{category.upper()}**\n\n"
+        for item in items:
+            emoji = item[9] or "📦"
+            text += f"{emoji} **{item[1]}** - {item[7]}💰\n"
+            text += f"   {item[2]}\n"
+            if item[8] > 0:  # level_required
+                text += f"   🔒 Требуется уровень: {item[8]}\n"
+            text += "\n"
         
-        is_crash, crash_pct = check_crash(asset)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="shop_back")]
+        ])
         
-        if bet_type == "auto":
-            win = random.random() < 0.5
-        elif bet_type == "up":
-            win = not is_crash
-        else:
-            win = is_crash
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    
+    elif action == "buy":
+        item_id = int(data[2])
+        user_id = callback.from_user.id
         
-        if win:
-            win_amt = amount * coef
-            db.update_balance(uid, win_amt - amount)
-            result = f"✅ *Победа!* +{win_amt:.2f} JET"
-            status = "win"
-            db.update_quest_progress(uid, 4, 1)  # Краш-босс
-        else:
-            db.update_balance(uid, -amount)
-            result = f"❌ *Поражение!* -{amount:.2f} JET"
-            status = "lose"
+        success, msg = db.buy_item(user_id, item_id)
+        await callback.answer(msg, show_alert=not success)
         
-        # Сохраняем ставку
-        conn = db.get_conn()
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO crash_bets (user_id, asset, bet_type, amount, coefficient, status, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (uid, asset, bet_type, float(amount), float(coef), status, int(datetime.now().timestamp())))
-        conn.commit()
-        conn.close()
+        if success:
+            await callback.message.edit_text(
+                f"✅ {msg}\n\n"
+                f"Используй /inventory чтобы посмотреть инвентарь",
+                parse_mode="Markdown"
+            )
+    
+    elif action == "back":
+        items = db.get_shop_items()
+        keyboard = create_shop_keyboard(items)
         
-        await state.clear()
-        await msg.answer(
-            f"💀 *Результат*\n\n{asset} | {bet_type.upper()} x{coef}\n"
-            f"{'💥 Краш!' if is_crash else '✅ Без краша'}\n\n"
-            f"{result}\n\nБаланс: {db.get_user(uid)['balance']:.2f}",
-            reply_markup=main_kb()
+        await callback.message.edit_text(
+            "🛒 **Магазин**\n\nВыбери категорию или предмет для покупки:",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
         )
-    except:
-        await msg.answer("❌ Введи число!", reply_markup=cancel_kb())
-
-# ==================== ФЕРМА ====================
-@dp.callback_query(F.data == "farm")
-async def farm_cb(cb: CallbackQuery):
-    await show_farm(cb.from_user.id, cb.message)
-    await cb.answer()
-
-async def show_farm(uid: int, msg: types.Message):
-    level, exp, last = db.get_farm(uid)
-    exp_needed = level * 100 + 50
-    income = Decimal('1') * (Decimal('1.1') ** level)
     
-    now = int(datetime.now().timestamp())
-    if last > 0:
-        elapsed = (now - last) // 3600
-        available = income * Decimal(elapsed) if elapsed > 0 else Decimal('0')
-    else:
-        available = Decimal('0')
+    await callback.answer()
+
+# ========== BOSS КОМАНДЫ (админские) ==========
+
+@dp.message(Command("spawn_boss"))
+async def cmd_spawn_boss(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("⛔ Только для администраторов!")
+        return
     
-    text = (
-        f"🌾 *Ферма*\n\n"
-        f"Уровень: {level}\n"
-        f"Опыт: {exp:.0f}/{exp_needed}\n"
-        f"Доход: {income:.2f} JET/час\n"
-        f"Доступно: {available:.2f} JET"
-    )
-    await msg.edit_text(text, reply_markup=farm_kb())
-
-@dp.callback_query(F.data == "farm_claim")
-async def farm_claim(cb: CallbackQuery):
-    uid = cb.from_user.id
-    level, exp, last = db.get_farm(uid)
-    income = Decimal('1') * (Decimal('1.1') ** level)
-    now = int(datetime.now().timestamp())
-    if last > 0:
-        elapsed = (now - last) // 3600
-        if elapsed > 0:
-            amount = income * Decimal(elapsed)
-            db.update_balance(uid, amount)
-            db.update_farm(uid, level, exp + Decimal(elapsed), now)
-            await cb.message.edit_text(
-                f"🌾 *Урожай собран!*\n\n+{amount:.2f} JET",
-                reply_markup=farm_kb()
-            )
-            db.update_quest_progress(uid, 5, 1)
-            await cb.answer()
-            return
-    await cb.answer("🌾 Ещё ничего не выросло!", show_alert=True)
-
-@dp.callback_query(F.data == "farm_upgrade")
-async def farm_upgrade(cb: CallbackQuery):
-    uid = cb.from_user.id
-    level, exp, last = db.get_farm(uid)
-    exp_needed = level * 100 + 50
-    if exp >= exp_needed:
-        db.update_farm(uid, level + 1, Decimal('0'), last)
-        await cb.message.edit_text(
-            f"⬆️ *Ферма улучшена!*\n\nУровень {level} → {level+1}",
-            reply_markup=farm_kb()
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "⚠️ Укажи имя босса\n"
+            "Доступные: zombie_king, dragon, demon_lord, mecha_giant"
         )
-        await cb.answer()
-    else:
-        await cb.answer(f"❌ Нужно {exp_needed - exp:.0f} опыта!", show_alert=True)
-
-@dp.callback_query(F.data == "farm_info")
-async def farm_info(cb: CallbackQuery):
-    await show_farm(cb.from_user.id, cb.message)
-    await cb.answer()
-
-# ==================== P2P ====================
-@dp.callback_query(F.data == "p2p")
-async def p2p_cb(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "🔄 *P2P-биржа*\n\nТоргуй напрямую с другими игроками!",
-        reply_markup=p2p_kb()
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data == "p2p_all")
-async def p2p_all(cb: CallbackQuery):
-    offers = db.get_p2p_offers()
-    text = "📊 *Все ордера:*\n\n"
-    if offers:
-        for o in offers[:10]:
-            emoji = "📈" if o['type'] == 'buy' else "📉"
-            user = db.get_user(o['user_id'])
-            uname = user['username'] if user else 'anon'
-            text += f"{emoji} {o['asset']} {o['amount']:.2f} @ {o['price']:.2f} — @{uname}\n"
-    else:
-        text += "❌ Нет активных ордеров"
-    await cb.message.edit_text(text, reply_markup=p2p_kb())
-    await cb.answer()
-
-# ==================== МАГАЗИН ====================
-@dp.callback_query(F.data == "shop")
-async def shop_cb(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "🏪 *Магазин*\n\nВыбери товар:",
-        reply_markup=shop_kb()
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("shop_"))
-async def shop_buy(cb: CallbackQuery, state: FSMContext):
-    item_id = cb.data.replace("shop_", "")
-    if item_id == "inventory":
-        await shop_inventory(cb)
         return
     
-    item = Config.SHOP_ITEMS.get(item_id)
-    if not item:
-        await cb.answer("❌ Товар не найден", show_alert=True)
+    boss_name = args[1]
+    
+    # Проверяем, существует ли босс
+    db.cursor.execute("SELECT name FROM bosses WHERE name = ?", (boss_name,))
+    if not db.cursor.fetchone():
+        await message.answer(f"❌ Босс '{boss_name}' не найден!")
         return
     
-    user = db.get_user(cb.from_user.id)
-    if user['balance'] < item['price']:
-        await cb.answer(f"❌ Нужно {item['price']:.0f} JET!", show_alert=True)
-        return
-    
-    await state.update_data(shop_item=item_id, shop_price=item['price'])
-    await cb.message.edit_text(
-        f"🛒 *Покупка*\n\n{item['emoji']} {item['name']}\n"
-        f"💰 Цена: {item['price']:.0f} JET\n"
-        f"📝 {item.get('description', '')}\n\n"
-        f"Подтверждаешь?",
-        reply_markup=confirm_kb()
-    )
-    await state.set_state(ShopFSM.confirm)
-    await cb.answer()
-
-@dp.callback_query(F.data == "shop_inventory")
-async def shop_inventory(cb: CallbackQuery):
-    uid = cb.from_user.id
-    inv = db.get_inventory(uid)
-    text = "📦 *Мой инвентарь*\n\n"
-    if inv:
-        for item_id, data in inv.items():
-            if data['quantity'] > 0:
-                item = Config.SHOP_ITEMS.get(item_id)
-                if item:
-                    text += f"{item['emoji']} {item['name']}: {data['quantity']} шт.\n"
-    else:
-        text += "❌ Пусто"
-    await cb.message.edit_text(text, reply_markup=shop_kb())
-    await cb.answer()
-
-# ==================== КВЕСТЫ ====================
-@dp.callback_query(F.data == "quests")
-async def quests_cb(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "🏅 *Квесты*\n\nВыполняй задания и получай награды!",
-        reply_markup=quest_kb()
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data == "quest_list")
-async def quest_list(cb: CallbackQuery):
-    uid = cb.from_user.id
-    quests = db.get_quests(uid)
-    text = "📋 *Квесты*\n\n"
-    for q in quests:
-        if q['completed']:
-            status = "✅"
-        else:
-            status = f"⬜ {q['progress']}/{q['count']}"
-        text += f"{status} *{q['name']}*\n{q['description']}\n"
-        text += f"Награда: {q['reward']:.0f} JET + {q['crystals']} 💎\n\n"
-    await cb.message.edit_text(text, reply_markup=quest_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "quest_progress")
-async def quest_progress(cb: CallbackQuery):
-    uid = cb.from_user.id
-    quests = db.get_quests(uid)
-    completed = sum(1 for q in quests if q['completed'])
-    total = len(quests)
-    text = f"📊 *Прогресс квестов*\n\nВыполнено: {completed}/{total} ({completed/total*100:.0f}%)"
-    await cb.message.edit_text(text, reply_markup=quest_kb())
-    await cb.answer()
-
-# ==================== ДЕЙЛИ ====================
-@dp.callback_query(F.data == "daily")
-async def daily_cb(cb: CallbackQuery):
-    uid = cb.from_user.id
-    last, streak = db.get_daily(uid)
-    today = datetime.now().strftime('%Y-%m-%d')
-    
-    if last:
-        last_date = datetime.strptime(last, '%Y-%m-%d')
-        diff = (datetime.now() - last_date).days
-        if diff > 1:
-            streak = 0
-        elif diff == 0:
-            bonus = Config.DAILY_BONUSES[min(streak, len(Config.DAILY_BONUSES)-1)]
-            await cb.message.edit_text(
-                f"🎁 *Уже получено!*\nЗавтра: {bonus} JET",
-                reply_markup=main_kb()
-            )
-            await cb.answer()
-            return
-    
-    if streak >= len(Config.DAILY_BONUSES):
-        streak = len(Config.DAILY_BONUSES) - 1
-    
-    bonus = Config.DAILY_BONUSES[streak]
-    db.update_balance(uid, Decimal(str(bonus)))
-    db.update_daily(uid, streak + 1)
-    db.update_quest_progress(uid, 8, 1)  # Ежедневный игрок
-    
-    await cb.message.edit_text(
-        f"🎁 *Дейли бонус!*\n\n+{bonus} JET\nДень {streak+1}/{len(Config.DAILY_BONUSES)}\n"
-        f"Баланс: {db.get_user(uid)['balance']:.2f}",
-        reply_markup=main_kb()
-    )
-    await cb.answer()
-
-# ==================== РЕФЕРАЛЫ ====================
-@dp.callback_query(F.data == "referral")
-async def referral_cb(cb: CallbackQuery):
-    uid = cb.from_user.id
-    count = db.get_referral_count(uid)
-    link = f"https://t.me/{bot.username}?start=ref_{uid}"
-    text = (
-        f"👥 *Рефералы*\n\n"
-        f"🔗 `{link}`\n\n"
-        f"👥 Приведено: {count}\n"
-        f"🎁 Бонус: {Config.REFERRAL_BONUS:.0f} JET\n"
-    )
-    if count >= 5:
-        text += "🔓 *Доступ к сигналам открыт!*"
-    else:
-        text += f"🔒 Осталось {5-count} друзей"
-    await cb.message.edit_text(text, reply_markup=main_kb())
-    await cb.answer()
-
-# ==================== БАНК ====================
-@dp.callback_query(F.data == "bank")
-async def bank_cb(cb: CallbackQuery):
-    await show_bank(cb.from_user.id, cb.message)
-    await cb.answer()
-
-async def show_bank(uid: int, msg: types.Message):
-    balance, last = db.get_bank(uid)
-    interest = Decimal('0.05')  # 5% в день
-    text = (
-        f"🏦 *Банк*\n\n"
-        f"💰 Баланс: {fmt(balance)} JET\n"
-        f"📊 Процент: 5% в день\n"
-        f"💡 Пассивный доход!"
-    )
-    await msg.edit_text(text, reply_markup=bank_kb())
-
-@dp.callback_query(F.data == "bank_deposit")
-async def bank_deposit(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(
-        "💰 Введи сумму для депозита:",
-        reply_markup=cancel_kb()
-    )
-    await state.set_state(TransferFSM.amount)
-    await state.update_data(bank_action="deposit")
-    await cb.answer()
-
-@dp.callback_query(F.data == "bank_withdraw")
-async def bank_withdraw(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(
-        "💸 Введи сумму для вывода:",
-        reply_markup=cancel_kb()
-    )
-    await state.set_state(TransferFSM.amount)
-    await state.update_data(bank_action="withdraw")
-    await cb.answer()
-
-@dp.message(TransferFSM.amount)
-async def bank_amount(msg: types.Message, state: FSMContext):
-    try:
-        amount = Decimal(msg.text)
-        if amount <= 0:
-            await msg.answer("❌ > 0!", reply_markup=cancel_kb())
-            return
-        
-        data = await state.get_data()
-        action = data.get('bank_action')
-        uid = msg.from_user.id
-        
-        if action == "deposit":
-            user = db.get_user(uid)
-            if amount > user['balance']:
-                await msg.answer(f"❌ Недостаточно!", reply_markup=cancel_kb())
-                return
-            db.update_balance(uid, -amount)
-            conn = db.get_conn()
-            c = conn.cursor()
-            c.execute('UPDATE bank_accounts SET balance = balance + ? WHERE user_id = ?',
-                     (float(amount), uid))
-            conn.commit()
-            conn.close()
-            await state.clear()
-            await msg.answer(
-                f"💰 *Депозит принят!*\n\n+{amount:.2f} JET в банк",
-                reply_markup=bank_kb()
-            )
-        else:
-            bank_balance = db.get_bank_balance(uid)
-            if amount > bank_balance:
-                await msg.answer(f"❌ В банке только {fmt(bank_balance)}!", reply_markup=cancel_kb())
-                return
-            db.update_balance(uid, amount)
-            conn = db.get_conn()
-            c = conn.cursor()
-            c.execute('UPDATE bank_accounts SET balance = balance - ? WHERE user_id = ?',
-                     (float(amount), uid))
-            conn.commit()
-            conn.close()
-            await state.clear()
-            await msg.answer(
-                f"💸 *Вывод выполнен!*\n\n+{amount:.2f} JET на баланс",
-                reply_markup=bank_kb()
-            )
-    except:
-        await msg.answer("❌ Введи число!", reply_markup=cancel_kb())
-
-@dp.callback_query(F.data == "bank_interest")
-async def bank_interest(cb: CallbackQuery):
-    uid = cb.from_user.id
-    balance, last = db.get_bank(uid)
-    if balance > 0:
-        interest = balance * Decimal('0.05')  # 5%
-        db.update_bank_interest(uid, interest)
-        await cb.message.edit_text(
-            f"📊 *Проценты начислены!*\n\n+{interest:.2f} JET",
-            reply_markup=bank_kb()
+    if db.spawn_boss(boss_name):
+        # Получаем информацию о боссе
+        boss = db.get_active_boss()
+        await message.answer(
+            f"✅ Босс {boss['display_name']} появился!\n"
+            f"HP: {boss['max_hp']:,}\n"
+            f"Награда: {boss['reward_coins']} монет\n"
+            f"Присоединяйся: /join"
         )
     else:
-        await cb.answer("💰 Нет средств в банке!", show_alert=True)
+        await message.answer("❌ Босс уже активен! Напиши /boss")
 
-# ==================== ЛОТЕРЕЯ ====================
-@dp.callback_query(F.data == "lottery")
-async def lottery_cb(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "🎰 *Лотерея*\n\n"
-        "Купи билет за 1000 JET и выиграй до 100 000 JET!\n"
-        "Розыгрыш каждый час!",
-        reply_markup=lottery_kb()
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data == "lottery_buy")
-async def lottery_buy(cb: CallbackQuery):
-    uid = cb.from_user.id
-    user = db.get_user(uid)
-    if user['balance'] < 1000:
-        await cb.answer("❌ Нужно 1000 JET!", show_alert=True)
+@dp.message(Command("kill_boss"))
+async def cmd_kill_boss(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("⛔ Только для администраторов!")
         return
     
-    db.update_balance(uid, -1000)
-    ticket_num = random.randint(1, 1000000)
-    draw_id = int(datetime.now().timestamp()) // 3600
-    db.add_lottery_ticket(uid, ticket_num, draw_id)
+    boss = db.get_active_boss()
+    if not boss:
+        await message.answer("❌ Нет активных боссов!")
+        return
     
-    await cb.message.edit_text(
-        f"🎫 *Билет куплен!*\n\nНомер: {ticket_num}\nТираж: {draw_id}\nУдачи! 🍀",
-        reply_markup=lottery_kb()
+    # Убиваем босса
+    db.cursor.execute(
+        "UPDATE bosses SET current_hp = 0, is_active = FALSE WHERE id = ?",
+        (boss["id"],)
     )
-    await cb.answer()
-
-# ==================== НОВОСТИ ====================
-@dp.callback_query(F.data == "news")
-async def news_cb(cb: CallbackQuery):
-    news = [
-        "🐳 Крупный кит купил PEPE на 5M JET!",
-        "🚀 DOGE готов к листингу!",
-        "🔥 SHIB бьёт рекорды волатильности!",
-        "💀 Аналитики ждут крах PEPE!",
-        "📈 Рынок растёт 3-й день подряд!",
-        "🎉 PEPE достиг ATH!",
-        "⚠️ Инвесторы фиксируют прибыль",
-        "💪 DOGE ралли продолжается!",
-        "🤖 Илон Маск твитнул про FLOKI!",
-        "📊 Объём торгов вырос на 500%!"
-    ]
-    await cb.message.edit_text(
-        f"📰 *Новости*\n\n{random.choice(news)}",
-        reply_markup=main_kb()
-    )
-    await cb.answer()
-
-# ==================== ПОМОЩЬ ====================
-@dp.callback_query(F.data == "help")
-async def help_cb(cb: CallbackQuery):
-    text = (
-        "📖 *Помощь*\n\n"
-        "💰 *Торговля* — покупай/продавай активы\n"
-        "⚡ *Плечо* x2/x5/x10 — умножает прибыль\n"
-        "💀 *Краш* — актив может упасть на 30-90%\n"
-        "🔒 *Стейкинг* — 10% за 8ч\n"
-        "🌾 *Ферма* — пассивный доход\n"
-        "🔄 *P2P* — торгуй с другими\n"
-        "🏅 *Квесты* — задания с наградами\n"
-        "🏪 *Магазин* — бустеры и улучшения\n"
-        "🏦 *Банк* — 5% в день\n"
-        "🎰 *Лотерея* — выиграй джекпот\n"
-        "🎁 *Дейли* — бонус каждый день\n"
-        "👥 *Рефералы* — приводи друзей"
-    )
-    await cb.message.edit_text(text, reply_markup=main_kb())
-    await cb.answer()
-
-# ==================== ТУРНИРЫ ====================
-@dp.callback_query(F.data == "tournaments")
-async def tournaments_cb(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "🏅 *Турниры*\n\n"
-        "Соревнуйся с другими игроками!\n"
-        "Побеждает тот, кто заработает больше всех за время турнира.",
-        reply_markup=tournament_kb()
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data == "tournament_current")
-async def tournament_current(cb: CallbackQuery):
-    conn = db.get_conn()
-    c = conn.cursor()
-    now = int(datetime.now().timestamp())
-    c.execute('SELECT * FROM tournaments WHERE status = "active" AND end_time > ? ORDER BY start_time DESC LIMIT 1', (now,))
-    r = c.fetchone()
-    conn.close()
-    if r:
-        text = f"🏅 *{r[1]}*\n\nПриз: {fmt(Decimal(str(r[2])))} JET\nУчастников: {r[6]}\n"
-        remaining = r[4] - now
-        h, m = remaining // 3600, (remaining % 3600) // 60
-        text += f"⏳ Осталось: {h}ч {m}мин"
-    else:
-        text = "🏅 *Нет активных турниров*"
-    await cb.message.edit_text(text, reply_markup=tournament_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "tournament_rank")
-async def tournament_rank(cb: CallbackQuery):
-    conn = db.get_conn()
-    c = conn.cursor()
-    now = int(datetime.now().timestamp())
-    c.execute('SELECT id FROM tournaments WHERE status = "active" AND end_time > ? ORDER BY start_time DESC LIMIT 1', (now,))
-    r = c.fetchone()
-    if r:
-        ranking = db.get_tournament_ranking(r[0])
-        text = "📊 *Рейтинг турнира:*\n\n"
-        for i, (uid, uname, profit) in enumerate(ranking[:10], 1):
-            m = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-            text += f"{m} @{uname or 'anon'} — +{fmt(profit)} JET\n"
-    else:
-        text = "📊 *Нет активных турниров*"
-    conn.close()
-    await cb.message.edit_text(text, reply_markup=tournament_kb())
-    await cb.answer()
-
-async def update_tournaments(uid: int, profit: Decimal):
-    conn = db.get_conn()
-    c = conn.cursor()
-    now = int(datetime.now().timestamp())
-    c.execute('SELECT id FROM tournaments WHERE status = "active" AND end_time > ?', (now,))
-    ts = c.fetchall()
-    for (tid,) in ts:
-        db.update_tournament_profit(tid, uid, profit)
-    conn.close()
-
-# ==================== ДОСТИЖЕНИЯ ====================
-async def check_achievements(uid: int, msg: types.Message):
-    user = db.get_user(uid)
-    portfolio = db.get_portfolio(uid)
-    capital = db.get_total_capital(uid)
-    has = db.get_achievements(uid)
-    stats = db.get_trade_stats(uid)
-    new = []
+    db.conn.commit()
     
-    if stats['total'] >= 1 and 1 not in has: new.append(1)
-    if stats['total'] >= 10 and stats['win'] == 0 and 2 not in has: new.append(2)
-    for asset, data in portfolio.items():
-        if data['amount'] > 1000 and 3 not in has:
-            new.append(3); break
-    if capital > 1000000000 and 4 not in has: new.append(4)
-    if all(data['amount'] > 0 for data in portfolio.values()) and 5 not in has: new.append(5)
-    if user['stake_amount'] >= 10000 and 6 not in has: new.append(6)
-    if db.get_rank(uid) <= 3 and 7 not in has: new.append(7)
-    if stats['total'] >= 100 and 8 not in has: new.append(8)
-    if user['vip_level'] >= 5 and 10 not in has: new.append(10)
-    if user['farm_level'] >= 10 and 11 not in has: new.append(11)
+    result = db.boss_killed(boss["id"])
     
-    names = {
-        1: "🏅 Первая сделка",
-        2: "💀 Хомяк",
-        3: "🐋 Кит",
-        4: "👑 Миллиардер",
-        5: "📊 Инвестор",
-        6: "🔒 Стейкер",
-        7: "🏆 Лидер",
-        8: "🔥 Трейдер",
-        10: "💎 Алмазный VIP",
-        11: "🌾 Фермер"
-    }
+    await message.answer(
+        f"💀 Босс {boss['display_name']} был принудительно убит!"
+    )
+
+@dp.message(Command("boss_list"))
+async def cmd_boss_list(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("⛔ Только для администраторов!")
+        return
     
-    for aid in new:
-        db.add_achievement(uid, aid)
-        await msg.answer(f"🎉 *Новое достижение!*\n\n{names.get(aid, '')}")
+    db.cursor.execute("SELECT name, display_name, max_hp, is_active FROM bosses")
+    bosses = db.cursor.fetchall()
+    
+    text = "📋 **Список боссов**\n\n"
+    for boss in bosses:
+        status = "🟢 Активен" if boss[3] else "🔴 Неактивен"
+        text += f"• {boss[1]}\n"
+        text += f"  ID: {boss[0]} | HP: {boss[2]:,} | {status}\n\n"
+    
+    await message.answer(text, parse_mode="Markdown")
 
-# ==================== ФОНОВЫЕ ПРОЦЕССЫ ====================
-async def update_prices():
-    while True:
-        try:
-            for asset in ASSETS:
-                new_price, is_crash, crash_pct = calc_price(asset)
-                if new_price > Config.PRICE_MAX:
-                    new_price = Config.PRICE_MAX
-                if new_price < Decimal('0.001'):
-                    new_price = Decimal('0.001')
-                
-                db.update_price(asset, new_price)
-                
-                if is_crash:
-                    logger.info(f"💥 CRASH {asset}: -{crash_pct*100:.1f}%")
-                    users = db.get_all_users()
-                    for uid in users:
-                        try:
-                            await bot.send_message(
-                                uid,
-                                f"💥 *КРАШ!*\n\n{ASSETS[asset]['emoji']} {asset}\n"
-                                f"Падение: {crash_pct*100:.1f}%\n"
-                                f"Новая цена: {new_price:.2f} JET",
-                                reply_markup=main_kb()
-                            )
-                        except:
-                            pass
-                    await asyncio.sleep(3)
-                
-                await asyncio.sleep(0.5)
-            await asyncio.sleep(Config.UPDATE_INTERVAL)
-        except Exception as e:
-            logger.error(f"Price update: {e}")
-            await asyncio.sleep(60)
+# ========== ОБРАБОТКА INLINE КНОПОК ДЛЯ БОССОВ ==========
 
-async def check_stakes():
-    while True:
-        try:
-            conn = db.get_conn()
-            c = conn.cursor()
-            now = int(datetime.now().timestamp())
-            c.execute('''
-                SELECT user_id, stake_amount FROM users
-                WHERE stake_amount > 0 AND stake_time + ? <= ?
-            ''', (Config.STAKE_HOURS * 3600, now))
-            r = c.fetchall()
-            conn.close()
-            for uid, amt in r:
-                amt = Decimal(str(amt))
-                bonus = amt * (Config.STAKE_PERCENT / 100)
-                total = amt + bonus
-                db.update_balance(uid, total)
-                db.update_stake(uid, Decimal('0'), 0)
+@dp.callback_query(lambda c: c.data.startswith("boss_"))
+async def process_boss_callback(callback: types.CallbackQuery):
+    action = callback.data.split("_")[1]
+    
+    if action == "join":
+        user_id = callback.from_user.id
+        player = db.get_player(user_id)
+        
+        if not player:
+            await callback.answer("❌ Зарегистрируйся через /start", show_alert=True)
+            return
+        
+        boss = db.get_active_boss()
+        if not boss:
+            await callback.answer("❌ Нет активных боссов!", show_alert=True)
+            return
+        
+        # Проверяем, не участвует ли уже
+        db.cursor.execute(
+            "SELECT * FROM boss_participants WHERE boss_id = ? AND user_id = ?",
+            (boss["id"], user_id)
+        )
+        if db.cursor.fetchone():
+            await callback.answer("👋 Ты уже участвуешь!", show_alert=True)
+            return
+        
+        db.add_boss_participant(boss["id"], user_id)
+        await callback.answer("✅ Ты присоединился к битве!", show_alert=True)
+        
+        # Обновляем сообщение
+        participants = db.get_boss_participants(boss["id"])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚔️ Атаковать!", callback_data="boss_attack")],
+            [InlineKeyboardButton(text="📊 Топ дамагеров", callback_data="boss_top")]
+        ])
+        
+        await callback.message.edit_text(
+            create_boss_status(boss),
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+    
+    elif action == "attack":
+        # Эмулируем команду /attack
+        await callback.answer("⚔️ Используй команду /attack в чате!", show_alert=True)
+    
+    elif action == "top":
+        boss = db.get_active_boss()
+        if not boss:
+            await callback.answer("❌ Нет активных боссов!", show_alert=True)
+            return
+        
+        participants = db.get_boss_participants(boss["id"])
+        
+        if not participants:
+            await callback.answer("📊 Пока нет участников!", show_alert=True)
+            return
+        
+        text = "📊 **Топ дамагеров**\n\n"
+        medals = ["🥇", "🥈", "🥉"]
+        
+        for i, (user_id, damage) in enumerate(participants[:10]):
+            db.cursor.execute(
+                "SELECT username FROM players WHERE user_id = ?",
+                (user_id,)
+            )
+            username = db.cursor.fetchone()[0] or f"Игрок {user_id}"
+            medal = medals[i] if i < 3 else f"{i+1}."
+            text += f"{medal} @{username} - {damage:,} урона\n"
+        
+        await callback.message.answer(text, parse_mode="Markdown")
+        await callback.answer()
+
+# ========== ОБРАБОТЧИК ВСТУПЛЕНИЯ В ГРУППУ ==========
+
+@dp.message(lambda m: m.new_chat_members is not None)
+async def on_new_chat_member(message: types.Message):
+    for member in message.new_chat_members:
+        if member.id == bot.id:
+            # Бот добавлен в группу
+            chat_id = message.chat.id
+            chat_title = message.chat.title
+            
+            db.add_chat(chat_id, chat_title)
+            
+            await message.answer(
+                f"👋 Привет! Я Boss Raid Bot!\n\n"
+                f"📌 Чат: {chat_title}\n"
+                f"🎮 Используй /start чтобы начать игру\n"
+                f"👑 Администраторы могут использовать /spawn_boss [имя]"
+            )
+
+# ========== ФОНОВЫЕ ЗАДАЧИ ==========
+
+async def check_boss_regeneration():
+    """Проверяет и восстанавливает HP босса"""
+    boss = db.get_active_boss()
+    if not boss:
+        return
+    
+    # Восстанавливаем 0.5% HP каждые 5 минут
+    regen_amount = int(boss["max_hp"] * 0.005)
+    new_hp = min(boss["max_hp"], boss["current_hp"] + regen_amount)
+    
+    db.cursor.execute(
+        "UPDATE bosses SET current_hp = ? WHERE id = ?",
+        (new_hp, boss["id"])
+    )
+    db.conn.commit()
+    
+    # Если босс восстановился до 100% - уведомляем
+    if new_hp == boss["max_hp"]:
+        # Отправляем уведомление во все чаты
+        for chat_id in db.get_all_chat_ids():
+            try:
                 await bot.send_message(
-                    uid,
-                    f"🔓 *Стейк разблокирован!*\n\n+{total:.2f} JET\nБонус: {bonus:.2f}",
-                    reply_markup=main_kb()
+                    chat_id,
+                    f"🔄 {boss['display_name']} полностью восстановил здоровье!"
                 )
-                logger.info(f"Stake unlocked: {uid}")
-            await asyncio.sleep(60)
-        except Exception as e:
-            logger.error(f"Stake check: {e}")
-            await asyncio.sleep(60)
+            except:
+                pass
 
-async def update_vip():
-    while True:
-        try:
-            conn = db.get_conn()
-            c = conn.cursor()
-            c.execute('SELECT user_id, total_deposit FROM users')
-            r = c.fetchall()
-            conn.close()
-            for uid, dep in r:
-                dep = Decimal(str(dep))
-                level = 0
-                for lvl, info in Config.VIP_LEVELS.items():
-                    if dep >= info['min_deposit']:
-                        level = lvl
-                db.update_vip(uid, level)
-            await asyncio.sleep(3600)
-        except Exception as e:
-            logger.error(f"VIP update: {e}")
-            await asyncio.sleep(3600)
-
-async def farm_passive():
-    while True:
-        try:
-            conn = db.get_conn()
-            c = conn.cursor()
-            now = int(datetime.now().timestamp())
-            c.execute('SELECT user_id, farm_level, farm_exp, farm_last_claim FROM users WHERE farm_level > 0')
-            r = c.fetchall()
-            conn.close()
-            for uid, level, exp, last in r:
-                if last == 0:
-                    continue
-                elapsed = (now - last) // 3600
-                if elapsed > 0:
-                    income = Decimal('1') * (Decimal('1.1') ** level)
-                    exp_gain = income * Decimal(elapsed) / Decimal('10')
-                    new_exp = Decimal(str(exp)) + exp_gain
-                    db.update_farm(uid, level, new_exp, now)
-            await asyncio.sleep(3600)
-        except Exception as e:
-            logger.error(f"Farm passive: {e}")
-            await asyncio.sleep(3600)
-
-async def lottery_draw():
-    """Розыгрыш лотереи каждый час"""
-    while True:
-        try:
-            await asyncio.sleep(3600)  # Каждый час
-            
-            draw_id = int(datetime.now().timestamp()) // 3600
-            winning_num = random.randint(1, 1000000)
-            
-            conn = db.get_conn()
-            c = conn.cursor()
-            c.execute('''
-                SELECT user_id FROM lottery_tickets 
-                WHERE draw_id = ? AND ticket_number = ?
-            ''', (draw_id - 1, winning_num))
-            winners = c.fetchall()
-            conn.close()
-            
-            if winners:
-                prize = 100000  # Джекпот
-                for (uid,) in winners:
-                    db.update_balance(uid, Decimal(str(prize)))
-                    await bot.send_message(
-                        uid,
-                        f"🎉 *ТЫ ВЫИГРАЛ В ЛОТЕРЕЕ!*\n\n"
-                        f"Билет: {winning_num}\n"
-                        f"Приз: {prize:.0f} JET! 🍀",
-                        reply_markup=main_kb()
-                    )
-                logger.info(f"Lottery winner: {winners[0][0]} with ticket {winning_num}")
-                
-        except Exception as e:
-            logger.error(f"Lottery draw: {e}")
-            await asyncio.sleep(60)
-
-# ==================== ЗАПУСК ====================
-async def main():
-    asyncio.create_task(update_prices())
-    asyncio.create_task(check_stakes())
-    asyncio.create_task(update_vip())
-    asyncio.create_task(farm_passive())
-    asyncio.create_task(lottery_draw())
+async def schedule_boss_spawn():
+    """Автоматический спавн боссов по расписанию"""
+    # Получаем список боссов
+    db.cursor.execute("SELECT name, display_name FROM bosses")
+    bosses = db.cursor.fetchall()
     
-    logger.info("🚀 Bot started!")
+    for boss_name, display_name in bosses:
+        # Проверяем, не активен ли уже босс
+        if db.get_active_boss():
+            continue
+        
+        # Спавним босса
+        db.spawn_boss(boss_name)
+        
+        # Отправляем уведомление
+        for chat_id in db.get_all_chat_ids():
+            try:
+                boss = db.get_active_boss()
+                await bot.send_message(
+                    chat_id,
+                    f"⚔️ **{display_name} появился!**\n\n"
+                    f"HP: {boss['max_hp']:,}\n"
+                    f"💰 Награда: {boss['reward_coins']} монет\n"
+                    f"Присоединяйся: /join",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+        
+        # Спавним только одного босса
+        break
+
+async def boss_timeout():
+    """Если босс не убит за 12 часов - исчезает"""
+    boss = db.get_active_boss()
+    if not boss:
+        return
+    
+    # Проверяем время спавна
+    db.cursor.execute(
+        "SELECT spawn_time FROM bosses WHERE id = ?",
+        (boss["id"],)
+    )
+    spawn_time = datetime.fromisoformat(db.cursor.fetchone()[0])
+    
+    if (datetime.now() - spawn_time).seconds > 43200:  # 12 часов
+        # Босс исчезает
+        db.cursor.execute(
+            "UPDATE bosses SET is_active = FALSE WHERE id = ?",
+            (boss["id"],)
+        )
+        db.conn.commit()
+        
+        for chat_id in db.get_all_chat_ids():
+            try:
+                await bot.send_message(
+                    chat_id,
+                    f"💨 {boss['display_name']} исчез! Слишком долго никто не атаковал."
+                )
+            except:
+                pass
+
+# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
+
+async def main():
+    # Настройка расписания
+    # Спавн боссов каждый день в 12:00 и 20:00
+    scheduler.add_job(
+        schedule_boss_spawn,
+        CronTrigger(hour="12,20", minute="0"),
+        id="boss_spawn"
+    )
+    
+    # Регенерация босса каждые 5 минут
+    scheduler.add_job(
+        check_boss_regeneration,
+        "interval",
+        minutes=5,
+        id="boss_regen"
+    )
+    
+    # Проверка таймаута босса каждые 30 минут
+    scheduler.add_job(
+        boss_timeout,
+        "interval",
+        minutes=30,
+        id="boss_timeout"
+    )
+    
+    scheduler.start()
+    
+    logger.info("🤖 Бот запущен!")
+    logger.info("Расписание:")
+    logger.info("- Спавн боссов: 12:00 и 20:00")
+    logger.info("- Регенерация босса: каждые 5 минут")
+    logger.info("- Таймаут босса: каждые 30 минут")
+    
+    # Запуск бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
