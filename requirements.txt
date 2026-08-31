@@ -1,2 +1,4 @@
-aiogram>=3.0.0
-python-dotenv>=1.0.0
+aiogram==3.2.0
+apscheduler==3.10.4
+sqlite3==3.0.0
+python-dotenv==1.0.0
